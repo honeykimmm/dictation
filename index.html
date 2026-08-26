@@ -13,7 +13,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 <!-- Word(.docx) 스크립트 가져오기용 -->
-<script src="https://cdn.jsdelivr.net/npm/mammoth@1.12.1/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
 <style>
   :root{
@@ -132,7 +132,7 @@
   .banner-success{ background: var(--success-soft); color:#215a3d; border:1px solid #9DCFB5; }
 
   /* ---- Set list ---- */
-  .set-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 4px; border-bottom:1px solid var(--line); }
+  .set-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 4px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
   .set-row:last-child{ border-bottom:none; }
   .set-title{ font-weight:700; font-size:0.95rem; }
   .set-meta{ color: var(--ink-soft); font-size:0.78rem; margin-top:2px; }
@@ -207,6 +207,9 @@ if (!CONFIG_IS_PLACEHOLDER) {
   try { storage = firebase.storage(); } catch(e) { storage = null; } // Storage 미설정이어도 Firestore는 정상 동작
 }
 
+// 선생님 모드 비밀번호
+const TEACHER_PASSWORD = "0486";
+
 /* =========================================================
    2. 상태
    ========================================================= */
@@ -218,7 +221,9 @@ const state = {
   lastGrade: null,    // {score, total, segments(graded)}
   banner: null,
   audioMode: 'url',   // url | upload
-  bulkSets: []        // Word 일괄 가져오기로 인식된 세트 목록
+  bulkSets: [],       // Word 일괄 가져오기로 인식된 세트 목록
+  importDraft: { title:'', script:'', audioUrl:'' }, // 단일 세트 화면에서 Word로 가져온 값 프리필용
+  teacherUnlocked: false
 };
 
 /* =========================================================
@@ -257,39 +262,90 @@ function blankCount(segments){
   return segments.filter(s => s.type === 'blank').length;
 }
 
-// Word(.docx)에서 밑줄 친 단어를 {정답} 형식 스크립트로 변환
-function docxNodeChildrenToScript(el){
+// Word(.docx) 내부 XML을 직접 읽어서 처리
+const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const AUDIO_FILENAME_RE = /^([\w\-]+\.(mp3|wav|m4a|ogg))$/i;
+
+function docxIsUnderlined(rPr){
+  if(!rPr) return false;
+  const u = rPr.getElementsByTagNameNS(W_NS, 'u')[0];
+  if(!u) return false;
+  const val = u.getAttributeNS(W_NS, 'val');
+  return !!val && val !== 'none';
+}
+function docxIsShaded(rPr){
+  if(!rPr) return false;
+  const shd = rPr.getElementsByTagNameNS(W_NS, 'shd')[0];
+  if(!shd) return false;
+  const val = shd.getAttributeNS(W_NS, 'val');
+  return !!val && val !== 'clear' && val !== 'nil';
+}
+// 문단 하나를 {ch, underline, shaded} 문자 배열로 변환 (줄바꿈/탭 포함)
+function docxParseParagraph(p){
+  const runs = Array.from(p.getElementsByTagNameNS(W_NS, 'r'));
+  const chars = [];
+  runs.forEach(run => {
+    const rPr = run.getElementsByTagNameNS(W_NS, 'rPr')[0];
+    const underline = docxIsUnderlined(rPr);
+    const shaded = docxIsShaded(rPr);
+    Array.from(run.childNodes).forEach(node => {
+      const local = node.localName;
+      if(local === 't'){
+        for(const ch of (node.textContent||'')) chars.push({ ch, underline, shaded });
+      } else if(local === 'br' || local === 'cr'){
+        chars.push({ ch:'\n', underline:false, shaded:false });
+      } else if(local === 'tab'){
+        chars.push({ ch:' ', underline:false, shaded:false });
+      }
+    });
+  });
+  return chars;
+}
+function docxCharsToPlainText(chars){ return chars.map(c=>c.ch).join(''); }
+function docxShadedRatio(chars){
+  const text = docxCharsToPlainText(chars).trim();
+  if(!text) return 0;
+  const shadedText = chars.filter(c=>c.shaded).map(c=>c.ch).join('').trim();
+  return shadedText.length / text.length;
+}
+// 연속된 밑줄 문자를 하나로 합쳐 {정답}으로 변환 (워드가 단어 중간에서 런을 쪼개도 정상 병합됨)
+function docxCharsToScriptLine(chars){
   let out = '';
-  el.childNodes.forEach(n => out += docxNodeToScript(n));
+  let i = 0;
+  while(i < chars.length){
+    if(chars[i].underline){
+      let group = '';
+      while(i < chars.length && chars[i].underline){ group += chars[i].ch; i++; }
+      const trimmed = group.trim();
+      out += trimmed ? '{' + trimmed + '}' : group;
+    } else {
+      out += chars[i].ch; i++;
+    }
+  }
   return out;
 }
-function docxNodeToScript(node){
-  if(node.nodeType === Node.TEXT_NODE) return node.textContent;
-  if(node.nodeName === 'U'){
-    const raw = node.textContent;
-    const leading = raw.match(/^\s*/)[0];
-    const trailing = raw.match(/\s*$/)[0];
-    const core = raw.trim();
-    if(!core) return raw; // 공백만 밑줄 친 경우 그대로 둠
-    return leading + '{' + core + '}' + trailing;
-  }
-  return docxNodeChildrenToScript(node);
+async function docxReadParagraphs(file){
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const entry = zip.file('word/document.xml');
+  if(!entry) throw new Error('올바른 .docx 파일이 아니에요.');
+  const xmlText = await entry.async('text');
+  const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  return Array.from(xmlDoc.getElementsByTagNameNS(W_NS, 'p')).map(docxParseParagraph);
 }
 
-// Word(.docx) 한 파일 안에 여러 딕테이션이 있을 때, 하이라이트(형광펜) 친 제목 문단을 기준으로 분리
+// Word(.docx) 한 파일 안에 여러 딕테이션이 있을 때, 음영(하이라이트) 친 제목 문단을 기준으로 분리
+// 섹션 맨 윗줄이 'xxx.mp3' 같은 파일명이면 자동으로 떼서 음원 URL 후보로 사용
 async function docxToScripts(file){
-  const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.convertToHtml({ arrayBuffer }, { styleMap: ["u => u", "highlight => mark"] });
-  const container = document.createElement('div');
-  container.innerHTML = result.value;
-  const paragraphs = Array.from(container.querySelectorAll('p'));
-
+  const paragraphsChars = await docxReadParagraphs(file);
   const sets = [];
   let current = null;
-  paragraphs.forEach(p => {
-    const isTitle = !!p.querySelector('mark');
+  paragraphsChars.forEach(chars => {
+    const text = docxCharsToPlainText(chars).trim();
+    if(!text) return;
+    const isTitle = docxShadedRatio(chars) >= 0.5;
     if(isTitle){
-      current = { title: p.textContent.trim() || `세트 ${sets.length+1}`, lines: [] };
+      const cleanTitle = text.replace(/^[\s.·•‣▪:-]+/, '').trim() || `세트 ${sets.length+1}`;
+      current = { title: cleanTitle, lines: [] };
       sets.push(current);
       return;
     }
@@ -297,12 +353,17 @@ async function docxToScripts(file){
       current = { title: '(제목 없음)', lines: [] };
       sets.push(current);
     }
-    const line = docxNodeChildrenToScript(p);
-    if(line.trim()) current.lines.push(line);
+    current.lines.push(docxCharsToScriptLine(chars));
   });
-  return sets
-    .map(s => ({ title: s.title, script: s.lines.join('\n').trim() }))
-    .filter(s => s.script);
+  return sets.map(s => {
+    const lines = s.lines.slice();
+    let audioUrl = '';
+    if(lines.length){
+      const m = AUDIO_FILENAME_RE.exec(lines[0].trim());
+      if(m){ audioUrl = 'audio/' + m[1]; lines.shift(); }
+    }
+    return { title: s.title, script: lines.join('\n').trim(), audioUrl };
+  }).filter(s => s.script);
 }
 function renderTextSegment(value){
   return escapeHtml(value).replace(/\n/g, '<br>');
@@ -320,6 +381,21 @@ async function createSet(title, rawScript, audioUrl){
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
   });
   return { id: docRef.id, code };
+}
+async function updateSet(id, title, rawScript, audioUrl){
+  const segments = parseScript(rawScript);
+  await db.collection('dictationSets').doc(id).update({ title, segments, audioUrl });
+}
+async function deleteSet(id){
+  const subSnap = await db.collection('dictationSets').doc(id).collection('submissions').get();
+  const batch = db.batch();
+  subSnap.docs.forEach(d => batch.delete(d.ref));
+  batch.delete(db.collection('dictationSets').doc(id));
+  await batch.commit();
+}
+// 저장된 segments 배열을 다시 {정답} 형식 원본 스크립트 텍스트로 복원 (수정 화면용)
+function segmentsToRawScript(segments){
+  return (segments||[]).map(s => s.type === 'blank' ? '{' + s.answer + '}' : s.value).join('');
 }
 async function fetchSets(){
   const snap = await db.collection('dictationSets').orderBy('createdAt','desc').limit(50).get();
@@ -373,8 +449,7 @@ function renderHeader(){
   <div class="app-header">
     <div class="brand-mark"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span></div>
     <div>
-      <div class="app-title">딕테이션 자동채점</div>
-      <div class="app-sub">음원 듣고 빈칸 채우기 · 자동 채점 · 결과 저장</div>
+      <div class="app-title">Dictation 자동채점</div>
     </div>
   </div>`;
 }
@@ -396,9 +471,11 @@ function renderView(){
   }
   switch(state.view){
     case 'home': return renderHome();
+    case 'teacherAuth': return renderTeacherAuth();
     case 'teacherCreate': return renderTeacherCreate();
     case 'teacherBulkImport': return renderTeacherBulkImport();
     case 'teacherSets': return renderTeacherSets();
+    case 'teacherEditSet': return renderTeacherEditSetShell();
     case 'teacherResults': return renderTeacherResultsShell();
     case 'studentEntry': return renderStudentEntryShell();
     case 'studentQuiz': return renderStudentQuiz();
@@ -411,16 +488,34 @@ function renderView(){
 function renderHome(){
   return `
   <div class="role-grid">
-    <button class="role-card" data-go="teacherCreate">
+    <button class="role-card" id="btn-enter-teacher">
       <span class="emoji">🎧</span>
-      <h3>선생님이에요</h3>
+      <h3>선생님</h3>
       <p>새 딕테이션을 만들거나, 만들어둔 세트와 학생 결과를 확인해요.</p>
     </button>
     <button class="role-card" data-go="studentEntry">
       <span class="emoji">✏️</span>
-      <h3>학생이에요</h3>
-      <p>선생님이 알려주신 코드를 입력하고 딕테이션을 풀어요.</p>
+      <h3>학생</h3>
+      <p>코드를 입력하고 딕테이션을 풀어요.</p>
     </button>
+  </div>`;
+}
+
+/* ---- TEACHER: PASSWORD GATE ---- */
+function renderTeacherAuth(){
+  return `
+  ${renderBackRow()}
+  <div class="card">
+    <div class="eyebrow">선생님 모드</div>
+    <h2>비밀번호를 입력하세요</h2>
+    <label class="field">
+      <span class="flabel">비밀번호</span>
+      <input class="input" id="f-teacher-pw" type="password" placeholder="비밀번호">
+    </label>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-teacher-auth">입장하기</button>
+    </div>
+    <div id="teacher-auth-status"></div>
   </div>`;
 }
 
@@ -436,7 +531,7 @@ function renderTeacherCreate(){
 
     <label class="field">
       <span class="flabel">세트 제목</span>
-      <input class="input" id="f-title" placeholder="예: Unit 5 Dictation - 여행 표현">
+      <input class="input" id="f-title" placeholder="예: Unit 5 Dictation - 여행 표현" value="${escapeHtml(state.importDraft.title)}">
     </label>
 
     <label class="field">
@@ -445,8 +540,8 @@ function renderTeacherCreate(){
         <input type="file" id="f-docx-file" accept=".docx" style="display:none;">
         <button type="button" class="btn btn-ghost" id="btn-docx-import">📄 Word 파일에서 가져오기 (.docx)</button>
       </div>
-      <textarea class="input" id="f-script" placeholder="She {gave} him a {book} for his birthday."></textarea>
-      <div class="example-box">예시: We {arrived} at the airport {two hours} early.<br>→ "arrived", "two hours" 두 개의 빈칸이 만들어져요.<br>Word 파일에서 밑줄 친 단어는 자동으로 { } 처리돼요 — 불러온 뒤 꼭 한 번 확인해주세요.</div>
+      <textarea class="input" id="f-script" placeholder="She {gave} him a {book} for his birthday.">${escapeHtml(state.importDraft.script)}</textarea>
+      <div class="example-box">예시: We {arrived} at the airport {two hours} early.<br>→ "arrived", "two hours" 두 개의 빈칸이 만들어져요.<br>Word 파일에서 밑줄 친 단어와 하이라이트된 제목, 음원 파일명(예: track1.mp3)까지 자동으로 인식돼요 — 불러온 뒤 꼭 한 번 확인해주세요.</div>
     </label>
 
     <label class="field">
@@ -457,7 +552,7 @@ function renderTeacherCreate(){
       </div>
       <div id="audio-input-area">
         ${state.audioMode === 'url'
-          ? `<input class="input" id="f-audio-url" placeholder="https://... 또는 audio/set1.mp3">`
+          ? `<input class="input" id="f-audio-url" placeholder="https://... 또는 audio/set1.mp3" value="${escapeHtml(state.importDraft.audioUrl)}">`
           : `<input class="input" id="f-audio-file" type="file" accept="audio/*">`}
       </div>
       <span class="fhint">파일 업로드는 Firebase Storage에 저장돼요. GitHub 저장소에 mp3를 올려두셨다면 URL 입력으로 경로만 적어도 돼요.</span>
@@ -498,7 +593,7 @@ function renderBulkSetsList(){
       </label>
       <label class="field" style="margin-bottom:0;">
         <span class="flabel">음원 URL</span>
-        <input class="input bulk-audio" data-idx="${i}" placeholder="audio/unit5.mp3">
+        <input class="input bulk-audio" data-idx="${i}" placeholder="audio/unit5.mp3" value="${escapeHtml(s.audioUrl||'')}">
       </label>
     </div>
   `).join('');
@@ -542,11 +637,31 @@ async function loadTeacherSets(){
           <div class="set-title">${escapeHtml(s.title||'(제목 없음)')}</div>
           <div class="set-meta">빈칸 ${blankCount(s.segments||[])}개 · 코드 <span class="code-pill">${escapeHtml(s.code)}</span></div>
         </div>
-        <button class="btn btn-ghost" data-goto-results="${s.id}">결과 보기</button>
+        <div class="btn-row" style="gap:8px;">
+          <button class="btn btn-ghost" data-goto-results="${s.id}">결과 보기</button>
+          <button class="btn btn-ghost" data-goto-edit="${s.id}">수정</button>
+          <button class="btn btn-ghost" data-delete-set="${s.id}" style="color:var(--error); border-color:#EFA9A3;">삭제</button>
+        </div>
       </div>
     `).join('');
     area.querySelectorAll('[data-goto-results]').forEach(btn => {
       btn.addEventListener('click', () => goto('teacherResults', { currentSetId: btn.dataset.gotoResults }));
+    });
+    area.querySelectorAll('[data-goto-edit]').forEach(btn => {
+      btn.addEventListener('click', () => goto('teacherEditSet', { currentSetId: btn.dataset.gotoEdit }));
+    });
+    area.querySelectorAll('[data-delete-set]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if(!confirm('정말 이 세트를 삭제할까요? 학생 제출 기록도 함께 삭제돼요.')) return;
+        btn.disabled = true;
+        try{
+          await deleteSet(btn.dataset.deleteSet);
+          loadTeacherSets();
+        }catch(e){
+          alert('삭제 중 오류가 발생했어요: ' + e.message);
+          btn.disabled = false;
+        }
+      });
     });
   }catch(e){
     area.innerHTML = `<div class="banner banner-error">목록을 불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
@@ -590,6 +705,68 @@ async function loadTeacherResults(){
       </div>`;
   }catch(e){
     area.innerHTML = `<div class="banner banner-error">결과를 불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+/* ---- TEACHER: EDIT SET ---- */
+function renderTeacherEditSetShell(){
+  setTimeout(loadTeacherEditSet, 0);
+  return `
+  ${renderBackRow('teacherSets')}
+  <div class="card" id="edit-set-area">
+    <div class="spinner"></div>
+  </div>`;
+}
+async function loadTeacherEditSet(){
+  const area = document.getElementById('edit-set-area');
+  if(!area || !state.currentSetId) return;
+  try{
+    const set = await fetchSetById(state.currentSetId);
+    if(!set){ area.innerHTML = `<div class="empty-state">세트를 찾을 수 없어요.</div>`; return; }
+    const rawScript = segmentsToRawScript(set.segments);
+    area.innerHTML = `
+      <div class="eyebrow">세트 수정</div>
+      <h2>${escapeHtml(set.title||'(제목 없음)')}</h2>
+      <label class="field">
+        <span class="flabel">세트 제목</span>
+        <input class="input" id="edit-title" value="${escapeHtml(set.title||'')}">
+      </label>
+      <label class="field">
+        <span class="flabel">딕테이션 스크립트</span>
+        <textarea class="input" id="edit-script" style="min-height:180px;">${escapeHtml(rawScript)}</textarea>
+      </label>
+      <label class="field" style="margin-bottom:0;">
+        <span class="flabel">음원 URL</span>
+        <input class="input" id="edit-audio" value="${escapeHtml(set.audioUrl||'')}">
+      </label>
+      <div class="btn-row" style="margin-top:16px;">
+        <button class="btn btn-primary" id="btn-save-edit">저장하기</button>
+      </div>
+      <div id="edit-status"></div>`;
+    document.getElementById('btn-save-edit').addEventListener('click', async () => {
+      const title = document.getElementById('edit-title').value.trim();
+      const script = document.getElementById('edit-script').value;
+      const audioUrl = document.getElementById('edit-audio').value.trim();
+      const statusEl = document.getElementById('edit-status');
+      if(!title || !script.trim() || !audioUrl){
+        statusEl.innerHTML = `<div class="banner banner-error">제목·스크립트·음원 URL을 모두 입력해주세요.</div>`;
+        return;
+      }
+      if(parseScript(script).filter(s=>s.type==='blank').length === 0){
+        statusEl.innerHTML = `<div class="banner banner-error">{ } 로 표시된 빈칸이 하나도 없어요.</div>`;
+        return;
+      }
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      try{
+        await updateSet(state.currentSetId, title, script, audioUrl);
+        statusEl.innerHTML = `<div class="banner banner-success">저장했어요!</div>`;
+        setTimeout(() => goto('teacherSets'), 700);
+      }catch(e){
+        statusEl.innerHTML = `<div class="banner banner-error">저장 중 오류: ${escapeHtml(e.message)}</div>`;
+      }
+    });
+  }catch(e){
+    area.innerHTML = `<div class="banner banner-error">불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -694,6 +871,29 @@ function attachHandlers(){
     el.addEventListener('click', () => { state.banner = null; goto(el.dataset.go); });
   });
 
+  // 선생님 카드: 비밀번호 확인 후에만 입장
+  const enterTeacherBtn = document.getElementById('btn-enter-teacher');
+  if(enterTeacherBtn){
+    enterTeacherBtn.addEventListener('click', () => {
+      state.banner = null;
+      goto(state.teacherUnlocked ? 'teacherCreate' : 'teacherAuth');
+    });
+  }
+  const teacherAuthBtn = document.getElementById('btn-teacher-auth');
+  const teacherPwInput = document.getElementById('f-teacher-pw');
+  if(teacherAuthBtn && teacherPwInput){
+    const tryAuth = () => {
+      if(teacherPwInput.value === TEACHER_PASSWORD){
+        state.teacherUnlocked = true;
+        goto('teacherCreate');
+      } else {
+        document.getElementById('teacher-auth-status').innerHTML = `<div class="banner banner-error">비밀번호가 틀렸어요.</div>`;
+      }
+    };
+    teacherAuthBtn.addEventListener('click', tryAuth);
+    teacherPwInput.addEventListener('keydown', (e) => { if(e.key === 'Enter') tryAuth(); });
+  }
+
   // 라디오: 음원 입력 방식 전환
   document.querySelectorAll('input[name="audioMode"]').forEach(r => {
     r.addEventListener('change', (e) => { state.audioMode = e.target.value; render(); });
@@ -716,13 +916,21 @@ function attachHandlers(){
         } else if(results.length === 1){
           const r = results[0];
           const hasTitle = r.title && r.title !== '(제목 없음)';
-          if(hasTitle) document.getElementById('f-title').value = r.title;
-          document.getElementById('f-script').value = r.script;
+          state.importDraft = { title: hasTitle ? r.title : '', script: r.script, audioUrl: r.audioUrl || '' };
+          if(r.audioUrl) state.audioMode = 'url';
           const blanks = blankCount(parseScript(r.script));
-          statusEl.innerHTML = `<div class="banner banner-success">${hasTitle ? '제목과 ' : ''}빈칸 ${blanks}개를 자동으로 채웠어요. 확인 후 이상한 부분은 직접 고쳐주세요.</div>`;
+          const filledParts = [];
+          if(hasTitle) filledParts.push('제목');
+          if(r.audioUrl) filledParts.push('음원 URL');
+          const prefix = filledParts.length ? filledParts.join('·') + '과 ' : '';
+          state.banner = { type:'success', msg: `${prefix}빈칸 ${blanks}개를 자동으로 채웠어요. 확인 후 이상한 부분은 직접 고쳐주세요.` };
+          render();
+          return;
         } else {
-          document.getElementById('f-script').value = results.map(r=>r.script).join('\n\n');
-          statusEl.innerHTML = `<div class="banner banner-warn">이 파일 안에 딕테이션이 ${results.length}개 감지됐어요. 한 번에 여러 세트로 만드시려면 '여러 개 가져오기' 탭을 이용해보세요. 지금은 전체를 스크립트 칸에 합쳐 넣었어요.</div>`;
+          state.importDraft = { title:'', script: results.map(r=>r.script).join('\n\n'), audioUrl:'' };
+          state.banner = { type:'warn', msg: `이 파일 안에 딕테이션이 ${results.length}개 감지됐어요. 한 번에 여러 세트로 만드시려면 '여러 개 가져오기' 탭을 이용해보세요. 지금은 전체를 스크립트 칸에 합쳐 넣었어요.` };
+          render();
+          return;
         }
       }catch(e){
         statusEl.innerHTML = `<div class="banner banner-error">Word 파일을 읽지 못했어요: ${escapeHtml(e.message)}</div>`;
@@ -745,7 +953,7 @@ function attachHandlers(){
           state.bulkSets = [];
           statusEl.innerHTML = `<div class="banner banner-warn">딕테이션을 인식하지 못했어요. 각 제목 문단에 형광펜(하이라이트)이 칠해져 있는지 확인해주세요.</div>`;
         } else {
-          state.bulkSets = results.map(r => ({ title: r.title, script: r.script }));
+          state.bulkSets = results.map(r => ({ title: r.title, script: r.script, audioUrl: r.audioUrl || '' }));
           statusEl.innerHTML = `<div class="banner banner-success">${results.length}개의 딕테이션을 찾았어요. 아래에서 확인하고 세트별로 음원 URL을 채운 뒤 만들어주세요.</div>`;
         }
       }catch(e){
@@ -843,6 +1051,7 @@ function attachHandlers(){
         }
         const { code } = await createSet(title, script, audioUrl);
         statusEl.innerHTML = `<div class="banner banner-success">세트가 만들어졌어요! 학생 공유 코드: <b>${code}</b></div>`;
+        state.importDraft = { title:'', script:'', audioUrl:'' };
         setTimeout(() => goto('teacherSets'), 900);
       }catch(e){
         statusEl.innerHTML = `<div class="banner banner-error">저장 중 오류가 발생했어요: ${escapeHtml(e.message)}</div>`;
