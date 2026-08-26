@@ -198,8 +198,8 @@ const firebaseConfig = {
   appId: "1:438431222493:web:5bce01341983549ba72934"
 };
 
-const CONFIG_IS_PLACEHOLDER = firebaseConfig.apiKey === "AIzaSyCyEe3wyJkfzUPEjEMxzlglsW-TJ96EVOw";
-let db, storage;
+const CONFIG_IS_PLACEHOLDER = firebaseConfig.apiKey === "YOUR_API_KEY";
+  let db, storage;
 if (!CONFIG_IS_PLACEHOLDER) {
   firebase.initializeApp(firebaseConfig);
   db = firebase.firestore();
