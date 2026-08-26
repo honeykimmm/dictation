@@ -190,15 +190,15 @@
    (Firestore 사용 설정 + Storage 사용 설정을 콘솔에서 켜주세요)
    ========================================================= */
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyCyEe3wyJkfzUPEjEMxzlglsW-TJ96EVOw",
+  authDomain: "dictation-bb4c5.firebaseapp.com",
+  projectId: "dictation-bb4c5",
+  storageBucket: "dictation-bb4c5.firebasestorage.app",
+  messagingSenderId: "438431222493",
+  appId: "1:438431222493:web:5bce01341983549ba72934"
 };
 
-const CONFIG_IS_PLACEHOLDER = firebaseConfig.apiKey === "YOUR_API_KEY";
+const CONFIG_IS_PLACEHOLDER = firebaseConfig.apiKey === "AIzaSyCyEe3wyJkfzUPEjEMxzlglsW-TJ96EVOw";
 let db, storage;
 if (!CONFIG_IS_PLACEHOLDER) {
   firebase.initializeApp(firebaseConfig);
