@@ -188,8 +188,7 @@
 
 <script>
 /* =========================================================
-   1. FIREBASE 설정 — 본인 Firebase 프로젝트 정보로 교체하세요
-   (Firestore 사용 설정 + Storage 사용 설정을 콘솔에서 켜주세요)
+   1. FIREBASE 설정
    ========================================================= */
 const firebaseConfig = {
   apiKey: "AIzaSyCyEe3wyJkfzUPEjEMxzlglsW-TJ96EVOw",
@@ -218,7 +217,8 @@ const state = {
   studentName: '',
   lastGrade: null,    // {score, total, segments(graded)}
   banner: null,
-  audioMode: 'url'    // url | upload
+  audioMode: 'url',   // url | upload
+  bulkSets: []        // Word 일괄 가져오기로 인식된 세트 목록
 };
 
 /* =========================================================
@@ -258,18 +258,6 @@ function blankCount(segments){
 }
 
 // Word(.docx)에서 밑줄 친 단어를 {정답} 형식 스크립트로 변환
-async function docxToScript(file){
-  const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.convertToHtml({ arrayBuffer }, { styleMap: ["u => u"] });
-  const container = document.createElement('div');
-  container.innerHTML = result.value;
-  const paragraphs = Array.from(container.querySelectorAll('p'));
-  if(paragraphs.length === 0){
-    return docxNodeChildrenToScript(container);
-  }
-  const lines = paragraphs.map(p => docxNodeChildrenToScript(p));
-  return lines.join('\n');
-}
 function docxNodeChildrenToScript(el){
   let out = '';
   el.childNodes.forEach(n => out += docxNodeToScript(n));
@@ -286,6 +274,35 @@ function docxNodeToScript(node){
     return leading + '{' + core + '}' + trailing;
   }
   return docxNodeChildrenToScript(node);
+}
+
+// Word(.docx) 한 파일 안에 여러 딕테이션이 있을 때, 하이라이트(형광펜) 친 제목 문단을 기준으로 분리
+async function docxToScripts(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.convertToHtml({ arrayBuffer }, { styleMap: ["u => u", "highlight => mark"] });
+  const container = document.createElement('div');
+  container.innerHTML = result.value;
+  const paragraphs = Array.from(container.querySelectorAll('p'));
+
+  const sets = [];
+  let current = null;
+  paragraphs.forEach(p => {
+    const isTitle = !!p.querySelector('mark');
+    if(isTitle){
+      current = { title: p.textContent.trim() || `세트 ${sets.length+1}`, lines: [] };
+      sets.push(current);
+      return;
+    }
+    if(!current){
+      current = { title: '(제목 없음)', lines: [] };
+      sets.push(current);
+    }
+    const line = docxNodeChildrenToScript(p);
+    if(line.trim()) current.lines.push(line);
+  });
+  return sets
+    .map(s => ({ title: s.title, script: s.lines.join('\n').trim() }))
+    .filter(s => s.script);
 }
 function renderTextSegment(value){
   return escapeHtml(value).replace(/\n/g, '<br>');
@@ -380,6 +397,7 @@ function renderView(){
   switch(state.view){
     case 'home': return renderHome();
     case 'teacherCreate': return renderTeacherCreate();
+    case 'teacherBulkImport': return renderTeacherBulkImport();
     case 'teacherSets': return renderTeacherSets();
     case 'teacherResults': return renderTeacherResultsShell();
     case 'studentEntry': return renderStudentEntryShell();
@@ -452,11 +470,51 @@ function renderTeacherCreate(){
   </div>`;
 }
 
-/* ---- TEACHER: SET LIST ---- */
+/* ---- TEACHER: BULK IMPORT ---- */
+function renderTeacherBulkImport(){
+  return `
+  ${renderBackRow()}
+  ${renderTeacherTabs('bulk')}
+  <div class="card" style="margin-bottom:18px;">
+    <div class="eyebrow">여러 딕테이션 한 번에 가져오기</div>
+    <h2>Word 파일 하나로 여러 세트 만들기</h2>
+    <p class="muted">파일 안에서 형광펜(하이라이트) 칠해진 제목 문단을 새 세트의 시작으로 인식해요. 그 아래 줄들이 스크립트가 되고, 밑줄 친 단어는 자동으로 빈칸 처리돼요.</p>
+    <input type="file" class="input" id="f-bulk-docx" accept=".docx">
+    <div id="bulk-import-status" style="margin-top:12px;"></div>
+  </div>
+  <div id="bulk-sets-area">${renderBulkSetsList()}</div>`;
+}
+function renderBulkSetsList(){
+  if(!state.bulkSets || state.bulkSets.length === 0) return '';
+  const cards = state.bulkSets.map((s,i) => `
+    <div class="card" style="margin-bottom:14px;">
+      <label class="field">
+        <span class="flabel">세트 ${i+1} 제목</span>
+        <input class="input bulk-title" data-idx="${i}" value="${escapeHtml(s.title)}">
+      </label>
+      <label class="field">
+        <span class="flabel">스크립트 (빈칸 ${blankCount(parseScript(s.script))}개 인식됨 — 확인하고 필요하면 고쳐주세요)</span>
+        <textarea class="input bulk-script" data-idx="${i}" style="min-height:110px;">${escapeHtml(s.script)}</textarea>
+      </label>
+      <label class="field" style="margin-bottom:0;">
+        <span class="flabel">음원 URL</span>
+        <input class="input bulk-audio" data-idx="${i}" placeholder="audio/unit5.mp3">
+      </label>
+    </div>
+  `).join('');
+  return `
+  ${cards}
+  <div class="btn-row" style="margin-bottom:20px;">
+    <button class="btn btn-primary" id="btn-bulk-create-all">전체 ${state.bulkSets.length}개 세트 만들기</button>
+  </div>
+  <div id="bulk-create-status"></div>`;
+}
+
 function renderTeacherTabs(active){
   return `
   <div class="tabs">
     <button class="tab-btn ${active==='create'?'active':''}" data-go="teacherCreate">새로 만들기</button>
+    <button class="tab-btn ${active==='bulk'?'active':''}" data-go="teacherBulkImport">여러 개 가져오기</button>
     <button class="tab-btn ${active==='sets'?'active':''}" data-go="teacherSets">세트 · 결과 보기</button>
   </div>`;
 }
@@ -652,16 +710,96 @@ function attachHandlers(){
       const statusEl = document.getElementById('create-status');
       statusEl.innerHTML = `<div class="spinner"></div>`;
       try{
-        const script = await docxToScript(file);
-        const blanks = parseScript(script).filter(s=>s.type==='blank').length;
-        document.getElementById('f-script').value = script;
-        statusEl.innerHTML = blanks > 0
-          ? `<div class="banner banner-success">밑줄 친 단어 ${blanks}개를 빈칸으로 자동 변환했어요. 스크립트를 한 번 확인하고, 이상한 부분은 직접 고쳐주세요.</div>`
-          : `<div class="banner banner-warn">밑줄 친 부분을 찾지 못했어요. 스크립트를 불러오긴 했는데, 빈칸은 직접 { }로 표시해주세요.</div>`;
+        const results = await docxToScripts(file);
+        if(results.length === 0){
+          statusEl.innerHTML = `<div class="banner banner-warn">스크립트를 찾지 못했어요.</div>`;
+        } else if(results.length === 1){
+          const r = results[0];
+          const hasTitle = r.title && r.title !== '(제목 없음)';
+          if(hasTitle) document.getElementById('f-title').value = r.title;
+          document.getElementById('f-script').value = r.script;
+          const blanks = blankCount(parseScript(r.script));
+          statusEl.innerHTML = `<div class="banner banner-success">${hasTitle ? '제목과 ' : ''}빈칸 ${blanks}개를 자동으로 채웠어요. 확인 후 이상한 부분은 직접 고쳐주세요.</div>`;
+        } else {
+          document.getElementById('f-script').value = results.map(r=>r.script).join('\n\n');
+          statusEl.innerHTML = `<div class="banner banner-warn">이 파일 안에 딕테이션이 ${results.length}개 감지됐어요. 한 번에 여러 세트로 만드시려면 '여러 개 가져오기' 탭을 이용해보세요. 지금은 전체를 스크립트 칸에 합쳐 넣었어요.</div>`;
+        }
       }catch(e){
         statusEl.innerHTML = `<div class="banner banner-error">Word 파일을 읽지 못했어요: ${escapeHtml(e.message)}</div>`;
       }
       docxFileInput.value = '';
+    });
+  }
+
+  // Word 파일 하나로 여러 세트 가져오기
+  const bulkFileInput = document.getElementById('f-bulk-docx');
+  if(bulkFileInput){
+    bulkFileInput.addEventListener('change', async () => {
+      const file = bulkFileInput.files[0];
+      if(!file) return;
+      const statusEl = document.getElementById('bulk-import-status');
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      try{
+        const results = await docxToScripts(file);
+        if(results.length === 0){
+          state.bulkSets = [];
+          statusEl.innerHTML = `<div class="banner banner-warn">딕테이션을 인식하지 못했어요. 각 제목 문단에 형광펜(하이라이트)이 칠해져 있는지 확인해주세요.</div>`;
+        } else {
+          state.bulkSets = results.map(r => ({ title: r.title, script: r.script }));
+          statusEl.innerHTML = `<div class="banner banner-success">${results.length}개의 딕테이션을 찾았어요. 아래에서 확인하고 세트별로 음원 URL을 채운 뒤 만들어주세요.</div>`;
+        }
+      }catch(e){
+        statusEl.innerHTML = `<div class="banner banner-error">Word 파일을 읽지 못했어요: ${escapeHtml(e.message)}</div>`;
+      }
+      document.getElementById('bulk-sets-area').innerHTML = renderBulkSetsList();
+    });
+  }
+
+  // 여러 세트 한 번에 만들기
+  const bulkCreateAllBtn = document.getElementById('btn-bulk-create-all');
+  if(bulkCreateAllBtn){
+    bulkCreateAllBtn.addEventListener('click', async () => {
+      const titles = document.querySelectorAll('.bulk-title');
+      const scripts = document.querySelectorAll('.bulk-script');
+      const audios = document.querySelectorAll('.bulk-audio');
+      const statusEl = document.getElementById('bulk-create-status');
+      bulkCreateAllBtn.disabled = true;
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      let successCount = 0;
+      const okLines = [];
+      const errLines = [];
+      for(let i=0;i<titles.length;i++){
+        const title = titles[i].value.trim();
+        const script = scripts[i].value;
+        const audioUrl = audios[i].value.trim();
+        if(!title || !script.trim() || !audioUrl){
+          errLines.push(`세트 ${i+1}: 제목·스크립트·음원 URL을 모두 입력해주세요.`);
+          continue;
+        }
+        if(parseScript(script).filter(s=>s.type==='blank').length === 0){
+          errLines.push(`세트 ${i+1} (${title}): {} 로 표시된 빈칸이 없어요.`);
+          continue;
+        }
+        try{
+          const { code } = await createSet(title, script, audioUrl);
+          okLines.push(`${title} → 코드 ${code}`);
+          successCount++;
+        }catch(e){
+          errLines.push(`세트 ${i+1} (${title}): 저장 실패 - ${e.message}`);
+        }
+      }
+      let html = '';
+      if(successCount > 0){
+        html += `<div class="banner banner-success">${successCount}개 세트가 만들어졌어요.<br>${okLines.map(escapeHtml).join('<br>')}</div>`;
+      }
+      if(errLines.length > 0){
+        html += `<div class="banner banner-error">${errLines.map(escapeHtml).join('<br>')}</div>`;
+      }
+      statusEl.innerHTML = html;
+      bulkCreateAllBtn.disabled = false;
+      if(successCount > 0 && errLines.length === 0){
+        setTimeout(() => goto('teacherSets'), 1200);
+      }
     });
   }
 
