@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>딕테이션 자동채점</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+<!-- Word(.docx) 스크립트 가져오기용 -->
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.12.1/mammoth.browser.min.js"></script>
+
+<style>
+  :root{
+    --bg: #EDF2F1;
+    --paper: #FFFFFF;
+    --ink: #1F2A37;
+    --ink-soft: #5B6675;
+    --line: #DCE3E1;
+    --navy: #2B3A67;
+    --navy-deep: #1C2848;
+    --amber: #E2A33B;
+    --amber-soft: #FBEBCF;
+    --success: #3F9169;
+    --success-soft: #E4F3EB;
+    --error: #D65C54;
+    --error-soft: #FBEAE8;
+    --radius: 14px;
+    --shadow: 0 2px 4px rgba(31,42,55,0.05), 0 8px 24px rgba(31,42,55,0.06);
+    --font-display: 'Space Grotesk', 'Noto Sans KR', sans-serif;
+    --font-body: 'Noto Sans KR', sans-serif;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 100% 0%, rgba(226,163,59,0.10) 0%, transparent 45%),
+      radial-gradient(circle at 0% 100%, rgba(43,58,103,0.08) 0%, transparent 45%);
+    color: var(--ink);
+    font-family: var(--font-body);
+    min-height: 100vh;
+    line-height: 1.55;
+  }
+  #app{ max-width: 760px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  a{ color: inherit; }
+  button{ font-family: inherit; cursor:pointer; }
+  input, textarea, select{ font-family: inherit; }
+  :focus-visible{ outline: 3px solid var(--amber); outline-offset: 2px; }
+
+  /* ---- Header ---- */
+  .app-header{ display:flex; align-items:center; gap:14px; margin-bottom: 26px; }
+  .brand-mark{
+    width:46px; height:46px; border-radius: 12px;
+    background: var(--navy); flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
+    gap:3px;
+  }
+  .brand-mark .bar{ width:4px; background: var(--amber); border-radius:2px; animation: idlebar 2.2s ease-in-out infinite; }
+  .brand-mark .bar:nth-child(1){ height:10px; animation-delay: -1.4s; }
+  .brand-mark .bar:nth-child(2){ height:20px; animation-delay: -0.9s; }
+  .brand-mark .bar:nth-child(3){ height:14px; animation-delay: -0.4s; }
+  .brand-mark .bar:nth-child(4){ height:22px; animation-delay: -1.9s; }
+  @keyframes idlebar{ 0%,100%{ transform: scaleY(0.5);} 50%{ transform: scaleY(1);} }
+  .app-title{ font-family: var(--font-display); font-weight:700; font-size: 1.28rem; letter-spacing: -0.01em; }
+  .app-sub{ color: var(--ink-soft); font-size: 0.86rem; margin-top:1px; }
+
+  .backrow{ margin-bottom: 16px; }
+  .backlink{ background:none; border:none; color: var(--navy); font-weight:700; font-size:0.9rem; padding:6px 0; display:inline-flex; align-items:center; gap:5px; }
+
+  /* ---- Cards / Home ---- */
+  .card{ background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); }
+  .stack{ display:flex; flex-direction:column; gap:16px; }
+  .role-grid{ display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-top: 6px; }
+  @media (max-width:560px){ .role-grid{ grid-template-columns: 1fr; } }
+  .role-card{
+    background: var(--paper); border:1px solid var(--line); border-radius: var(--radius);
+    padding: 22px 18px; text-align:left; box-shadow: var(--shadow);
+    display:flex; flex-direction:column; gap:8px; transition: transform .15s ease, border-color .15s ease;
+  }
+  .role-card:hover{ transform: translateY(-2px); border-color: var(--amber); }
+  .role-card .emoji{ font-size:1.6rem; }
+  .role-card h3{ margin:0; font-family: var(--font-display); font-size:1.05rem; }
+  .role-card p{ margin:0; color: var(--ink-soft); font-size:0.85rem; }
+
+  /* ---- Typography ---- */
+  h1,h2,h3{ font-family: var(--font-display); margin: 0 0 4px; }
+  h2{ font-size:1.25rem; }
+  h3{ font-size:1.02rem; }
+  .muted{ color: var(--ink-soft); font-size:0.88rem; }
+  .eyebrow{ font-size:0.72rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color: var(--amber); margin-bottom:4px; }
+
+  /* ---- Tabs ---- */
+  .tabs{ display:flex; gap:8px; margin-bottom:18px; }
+  .tab-btn{ flex:1; background: var(--paper); border:1px solid var(--line); padding:10px 12px; border-radius:10px; font-weight:700; font-size:0.88rem; color: var(--ink-soft); }
+  .tab-btn.active{ background: var(--navy); color:#fff; border-color: var(--navy); }
+
+  /* ---- Forms ---- */
+  label.field{ display:block; margin-bottom:16px; }
+  label.field .flabel{ display:block; font-weight:700; font-size:0.88rem; margin-bottom:6px; }
+  label.field .fhint{ display:block; color: var(--ink-soft); font-size:0.78rem; margin-top:5px; }
+  .input, textarea.input, select.input{
+    width:100%; border:1.5px solid var(--line); border-radius:10px; padding:10px 12px;
+    font-size:0.95rem; background:#fff; color: var(--ink);
+  }
+  textarea.input{ min-height:150px; resize:vertical; font-family: 'Space Grotesk','Noto Sans KR',monospace; line-height:1.7; }
+  .input:focus, textarea.input:focus{ border-color: var(--navy); }
+  .example-box{ background: var(--amber-soft); border:1px dashed #D9AE5C; border-radius:10px; padding:10px 12px; font-size:0.82rem; color:#6b4f16; margin-top:6px; }
+  .btn{ border:none; border-radius:10px; padding:11px 18px; font-weight:700; font-size:0.92rem; }
+  .btn-primary{ background: var(--navy); color:#fff; }
+  .btn-primary:hover{ background: var(--navy-deep); }
+  .btn-primary:disabled{ background:#9aa3b5; cursor:not-allowed; }
+  .btn-ghost{ background:#fff; border:1.5px solid var(--line); color: var(--ink); }
+  .btn-amber{ background: var(--amber); color:#4a3610; }
+  .btn-row{ display:flex; gap:10px; flex-wrap:wrap; }
+  .radio-toggle{ display:flex; gap:8px; margin-bottom:10px; }
+  .radio-toggle label{ flex:1; border:1.5px solid var(--line); border-radius:10px; padding:8px 10px; font-size:0.84rem; text-align:center; font-weight:600; color: var(--ink-soft); cursor:pointer; }
+  .radio-toggle input{ display:none; }
+  .radio-toggle input:checked + span{ color: var(--navy); }
+  .radio-toggle label:has(input:checked){ border-color: var(--navy); background:#F1F4FA; }
+
+  /* ---- Banner / toast ---- */
+  .banner{ border-radius:10px; padding:12px 14px; font-size:0.85rem; margin-bottom:16px; }
+  .banner-warn{ background: var(--amber-soft); color:#6b4f16; border:1px solid #E9C273; }
+  .banner-error{ background: var(--error-soft); color:#8c2f28; border:1px solid #EFA9A3; }
+  .banner-success{ background: var(--success-soft); color:#215a3d; border:1px solid #9DCFB5; }
+
+  /* ---- Set list ---- */
+  .set-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 4px; border-bottom:1px solid var(--line); }
+  .set-row:last-child{ border-bottom:none; }
+  .set-title{ font-weight:700; font-size:0.95rem; }
+  .set-meta{ color: var(--ink-soft); font-size:0.78rem; margin-top:2px; }
+  .code-pill{ font-family: var(--font-display); background: var(--navy); color:#fff; border-radius:8px; padding:3px 9px; font-size:0.82rem; letter-spacing:.03em; }
+
+  /* ---- Waveform (signature element) ---- */
+  .listen-panel{ background: var(--navy); border-radius: var(--radius); padding:18px 18px 14px; margin-bottom:20px; }
+  .waveform{ display:flex; align-items:flex-end; justify-content:center; gap:3px; height:52px; margin-bottom:12px; }
+  .waveform .wbar{ width:4px; background: var(--amber); border-radius:2px; height:8px; transition: height .12s ease; opacity:0.85; }
+  .waveform.playing .wbar{ animation: wbounce 0.9s ease-in-out infinite; }
+  .waveform .wbar:nth-child(odd){ animation-delay: -0.3s; }
+  .waveform .wbar:nth-child(3n){ animation-delay: -0.6s; }
+  @keyframes wbounce{ 0%,100%{ height:8px;} 50%{ height:40px;} }
+  @media (prefers-reduced-motion: reduce){
+    .waveform.playing .wbar{ animation:none; height:24px; }
+    .brand-mark .bar{ animation:none; }
+  }
+  audio{ width:100%; }
+  .listen-controls{ display:flex; align-items:center; gap:10px; margin-top:10px; flex-wrap:wrap; }
+  .listen-controls select{ background:#22315a; color:#fff; border:1px solid #3c4d81; border-radius:8px; padding:6px 8px; font-size:0.82rem; }
+  .listen-controls .btn-ghost{ background:#22315a; border-color:#3c4d81; color:#fff; padding:7px 12px; font-size:0.82rem; }
+
+  /* ---- Dictation text / blanks ---- */
+  .script-box{ background: var(--paper); border:1px solid var(--line); border-radius: var(--radius); padding:22px; font-size:1.05rem; line-height:2.3; }
+  .blank-input{
+    display:inline-block; border:none; border-bottom:2.5px solid var(--navy); background: #F1F4FA;
+    font-family: var(--font-display); font-size:1rem; padding:2px 6px; margin: 0 2px; border-radius:4px 4px 0 0;
+    min-width: 3ch; text-align:center; color: var(--navy-deep);
+  }
+  .blank-input:disabled{ background: transparent; border-bottom-style: solid; }
+  .blank-input.correct{ border-bottom-color: var(--success); background: var(--success-soft); color:#1c5c3d; }
+  .blank-input.wrong{ border-bottom-color: var(--error); background: var(--error-soft); color:#8c2f28; text-decoration: line-through; }
+  .answer-tag{ font-size:0.78rem; font-weight:700; color: var(--success); background: var(--success-soft); border-radius:6px; padding:1px 6px; margin:0 2px; }
+
+  /* ---- Score ---- */
+  .score-hero{ text-align:center; padding: 26px 10px 8px; }
+  .score-num{ font-family: var(--font-display); font-size:3rem; font-weight:700; color: var(--navy); }
+  .score-label{ color: var(--ink-soft); font-size:0.9rem; }
+
+  /* ---- Results table ---- */
+  table{ width:100%; border-collapse: collapse; font-size:0.88rem; }
+  th{ text-align:left; color: var(--ink-soft); font-weight:700; font-size:0.76rem; text-transform:uppercase; letter-spacing:.04em; padding:8px 6px; border-bottom:2px solid var(--line); }
+  td{ padding:10px 6px; border-bottom:1px solid var(--line); }
+  tr:last-child td{ border-bottom:none; }
+
+  .empty-state{ text-align:center; padding: 30px 10px; color: var(--ink-soft); }
+  .spinner{ width:22px;height:22px;border-radius:50%;border:3px solid var(--line); border-top-color: var(--navy); animation: spin .7s linear infinite; margin: 20px auto; }
+  @keyframes spin{ to{ transform: rotate(360deg);} }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* =========================================================
+   1. FIREBASE 설정 — 본인 Firebase 프로젝트 정보로 교체하세요
+   (Firestore 사용 설정 + Storage 사용 설정을 콘솔에서 켜주세요)
+   ========================================================= */
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
+};
+
+const CONFIG_IS_PLACEHOLDER = firebaseConfig.apiKey === "YOUR_API_KEY";
+let db, storage;
+if (!CONFIG_IS_PLACEHOLDER) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+  try { storage = firebase.storage(); } catch(e) { storage = null; } // Storage 미설정이어도 Firestore는 정상 동작
+}
+
+/* =========================================================
+   2. 상태
+   ========================================================= */
+const state = {
+  view: 'home',       // home | teacherCreate | teacherSets | teacherResults | studentEntry | studentQuiz | studentResult
+  currentSet: null,   // {id, code, title, segments, audioUrl}
+  currentSetId: null,
+  studentName: '',
+  lastGrade: null,    // {score, total, segments(graded)}
+  banner: null,
+  audioMode: 'url'    // url | upload
+};
+
+/* =========================================================
+   3. 유틸
+   ========================================================= */
+function escapeHtml(str){
+  return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function normalize(str){
+  return (str||'').trim().toLowerCase().replace(/\s+/g,' ');
+}
+function genCode(len=6){
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for(let i=0;i<len;i++) out += chars[Math.floor(Math.random()*chars.length)];
+  return out;
+}
+// {정답} 형식으로 표시된 스크립트를 세그먼트 배열로 변환
+function parseScript(raw){
+  const segments = [];
+  const regex = /\{([^}]+)\}/g;
+  let lastIndex = 0, match, blankIndex = 0;
+  while((match = regex.exec(raw)) !== null){
+    if(match.index > lastIndex){
+      segments.push({ type:'text', value: raw.slice(lastIndex, match.index) });
+    }
+    segments.push({ type:'blank', answer: match[1].trim(), index: blankIndex++ });
+    lastIndex = regex.lastIndex;
+  }
+  if(lastIndex < raw.length){
+    segments.push({ type:'text', value: raw.slice(lastIndex) });
+  }
+  return segments;
+}
+function blankCount(segments){
+  return segments.filter(s => s.type === 'blank').length;
+}
+
+// Word(.docx)에서 밑줄 친 단어를 {정답} 형식 스크립트로 변환
+async function docxToScript(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.convertToHtml({ arrayBuffer }, { styleMap: ["u => u"] });
+  const container = document.createElement('div');
+  container.innerHTML = result.value;
+  const paragraphs = Array.from(container.querySelectorAll('p'));
+  if(paragraphs.length === 0){
+    return docxNodeChildrenToScript(container);
+  }
+  const lines = paragraphs.map(p => docxNodeChildrenToScript(p));
+  return lines.join('\n');
+}
+function docxNodeChildrenToScript(el){
+  let out = '';
+  el.childNodes.forEach(n => out += docxNodeToScript(n));
+  return out;
+}
+function docxNodeToScript(node){
+  if(node.nodeType === Node.TEXT_NODE) return node.textContent;
+  if(node.nodeName === 'U'){
+    const raw = node.textContent;
+    const leading = raw.match(/^\s*/)[0];
+    const trailing = raw.match(/\s*$/)[0];
+    const core = raw.trim();
+    if(!core) return raw; // 공백만 밑줄 친 경우 그대로 둠
+    return leading + '{' + core + '}' + trailing;
+  }
+  return docxNodeChildrenToScript(node);
+}
+function renderTextSegment(value){
+  return escapeHtml(value).replace(/\n/g, '<br>');
+}
+function setBanner(type, msg){ state.banner = {type, msg}; }
+
+/* =========================================================
+   4. Firestore / Storage 연동
+   ========================================================= */
+async function createSet(title, rawScript, audioUrl){
+  const segments = parseScript(rawScript);
+  const code = genCode();
+  const docRef = await db.collection('dictationSets').add({
+    title, code, segments, audioUrl,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { id: docRef.id, code };
+}
+async function fetchSets(){
+  const snap = await db.collection('dictationSets').orderBy('createdAt','desc').limit(50).get();
+  return snap.docs.map(d => ({ id:d.id, ...d.data() }));
+}
+async function fetchSetById(id){
+  const doc = await db.collection('dictationSets').doc(id).get();
+  if(!doc.exists) return null;
+  return { id: doc.id, ...doc.data() };
+}
+async function fetchSetByCode(code){
+  const snap = await db.collection('dictationSets').where('code','==', code.trim().toUpperCase()).limit(1).get();
+  if(snap.empty) return null;
+  const d = snap.docs[0];
+  return { id: d.id, ...d.data() };
+}
+async function saveSubmission(setId, studentName, score, total, answers){
+  await db.collection('dictationSets').doc(setId).collection('submissions').add({
+    studentName, score, total, answers,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+}
+async function fetchSubmissions(setId){
+  const snap = await db.collection('dictationSets').doc(setId).collection('submissions').orderBy('score','desc').get();
+  return snap.docs.map(d => ({ id:d.id, ...d.data() }));
+}
+async function uploadAudioFile(file){
+  const path = 'dictation-audio/' + Date.now() + '_' + file.name.replace(/[^\w.\-]/g,'_');
+  const ref = storage.ref().child(path);
+  await ref.put(file);
+  return await ref.getDownloadURL();
+}
+
+/* =========================================================
+   5. 라우팅 / 렌더 루트
+   ========================================================= */
+function goto(view, extra){
+  state.view = view;
+  Object.assign(state, extra||{});
+  render();
+}
+
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = renderHeader() + renderBanner() + renderView();
+  attachHandlers();
+}
+
+function renderHeader(){
+  return `
+  <div class="app-header">
+    <div class="brand-mark"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span></div>
+    <div>
+      <div class="app-title">딕테이션 자동채점</div>
+      <div class="app-sub">음원 듣고 빈칸 채우기 · 자동 채점 · 결과 저장</div>
+    </div>
+  </div>`;
+}
+
+function renderBanner(){
+  if(!state.banner) return '';
+  const b = state.banner;
+  const cls = b.type === 'error' ? 'banner-error' : b.type === 'success' ? 'banner-success' : 'banner-warn';
+  return `<div class="banner ${cls}">${escapeHtml(b.msg)}</div>`;
+}
+
+function renderView(){
+  if(CONFIG_IS_PLACEHOLDER){
+    return `
+    <div class="banner banner-warn">
+      <b>설정이 필요해요.</b> 코드 상단의 <code>firebaseConfig</code> 값을 본인의 Firebase 프로젝트 정보로 바꿔주세요.
+      Firestore와 Storage를 프로젝트에서 사용 설정한 뒤 다시 열어보세요.
+    </div>`;
+  }
+  switch(state.view){
+    case 'home': return renderHome();
+    case 'teacherCreate': return renderTeacherCreate();
+    case 'teacherSets': return renderTeacherSets();
+    case 'teacherResults': return renderTeacherResultsShell();
+    case 'studentEntry': return renderStudentEntryShell();
+    case 'studentQuiz': return renderStudentQuiz();
+    case 'studentResult': return renderStudentResult();
+    default: return renderHome();
+  }
+}
+
+/* ---- HOME ---- */
+function renderHome(){
+  return `
+  <div class="role-grid">
+    <button class="role-card" data-go="teacherCreate">
+      <span class="emoji">🎧</span>
+      <h3>선생님이에요</h3>
+      <p>새 딕테이션을 만들거나, 만들어둔 세트와 학생 결과를 확인해요.</p>
+    </button>
+    <button class="role-card" data-go="studentEntry">
+      <span class="emoji">✏️</span>
+      <h3>학생이에요</h3>
+      <p>선생님이 알려주신 코드를 입력하고 딕테이션을 풀어요.</p>
+    </button>
+  </div>`;
+}
+
+/* ---- TEACHER: CREATE ---- */
+function renderTeacherCreate(){
+  return `
+  ${renderBackRow()}
+  ${renderTeacherTabs('create')}
+  <div class="card">
+    <div class="eyebrow">새 딕테이션 만들기</div>
+    <h2>세트 정보 입력</h2>
+    <p class="muted">스크립트에서 정답으로 쓸 단어(구)는 <b>{ }</b> 로 감싸주세요. 여러 단어도 하나의 빈칸으로 묶을 수 있어요.</p>
+
+    <label class="field">
+      <span class="flabel">세트 제목</span>
+      <input class="input" id="f-title" placeholder="예: Unit 5 Dictation - 여행 표현">
+    </label>
+
+    <label class="field">
+      <span class="flabel">딕테이션 스크립트</span>
+      <div class="btn-row" style="margin-bottom:10px;">
+        <input type="file" id="f-docx-file" accept=".docx" style="display:none;">
+        <button type="button" class="btn btn-ghost" id="btn-docx-import">📄 Word 파일에서 가져오기 (.docx)</button>
+      </div>
+      <textarea class="input" id="f-script" placeholder="She {gave} him a {book} for his birthday."></textarea>
+      <div class="example-box">예시: We {arrived} at the airport {two hours} early.<br>→ "arrived", "two hours" 두 개의 빈칸이 만들어져요.<br>Word 파일에서 밑줄 친 단어는 자동으로 { } 처리돼요 — 불러온 뒤 꼭 한 번 확인해주세요.</div>
+    </label>
+
+    <label class="field">
+      <span class="flabel">음원 파일</span>
+      <div class="radio-toggle">
+        <label><input type="radio" name="audioMode" value="url" ${state.audioMode==='url'?'checked':''}><span>URL 입력</span></label>
+        <label><input type="radio" name="audioMode" value="upload" ${state.audioMode==='upload'?'checked':''}><span>파일 업로드</span></label>
+      </div>
+      <div id="audio-input-area">
+        ${state.audioMode === 'url'
+          ? `<input class="input" id="f-audio-url" placeholder="https://... 또는 audio/set1.mp3">`
+          : `<input class="input" id="f-audio-file" type="file" accept="audio/*">`}
+      </div>
+      <span class="fhint">파일 업로드는 Firebase Storage에 저장돼요. GitHub 저장소에 mp3를 올려두셨다면 URL 입력으로 경로만 적어도 돼요.</span>
+    </label>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-create-set">딕테이션 세트 만들기</button>
+    </div>
+    <div id="create-status"></div>
+  </div>`;
+}
+
+/* ---- TEACHER: SET LIST ---- */
+function renderTeacherTabs(active){
+  return `
+  <div class="tabs">
+    <button class="tab-btn ${active==='create'?'active':''}" data-go="teacherCreate">새로 만들기</button>
+    <button class="tab-btn ${active==='sets'?'active':''}" data-go="teacherSets">세트 · 결과 보기</button>
+  </div>`;
+}
+function renderTeacherSets(){
+  setTimeout(loadTeacherSets, 0);
+  return `
+  ${renderBackRow()}
+  ${renderTeacherTabs('sets')}
+  <div class="card" id="sets-list-area">
+    <div class="spinner"></div>
+  </div>`;
+}
+async function loadTeacherSets(){
+  const area = document.getElementById('sets-list-area');
+  if(!area) return;
+  try{
+    const sets = await fetchSets();
+    if(sets.length === 0){
+      area.innerHTML = `<div class="empty-state">아직 만든 딕테이션 세트가 없어요.<br>‘새로 만들기’에서 첫 세트를 만들어보세요.</div>`;
+      return;
+    }
+    area.innerHTML = sets.map(s => `
+      <div class="set-row">
+        <div>
+          <div class="set-title">${escapeHtml(s.title||'(제목 없음)')}</div>
+          <div class="set-meta">빈칸 ${blankCount(s.segments||[])}개 · 코드 <span class="code-pill">${escapeHtml(s.code)}</span></div>
+        </div>
+        <button class="btn btn-ghost" data-goto-results="${s.id}">결과 보기</button>
+      </div>
+    `).join('');
+    area.querySelectorAll('[data-goto-results]').forEach(btn => {
+      btn.addEventListener('click', () => goto('teacherResults', { currentSetId: btn.dataset.gotoResults }));
+    });
+  }catch(e){
+    area.innerHTML = `<div class="banner banner-error">목록을 불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+/* ---- TEACHER: RESULTS ---- */
+function renderTeacherResultsShell(){
+  setTimeout(loadTeacherResults, 0);
+  return `
+  ${renderBackRow('teacherSets')}
+  <div class="card" id="results-area">
+    <div class="spinner"></div>
+  </div>`;
+}
+async function loadTeacherResults(){
+  const area = document.getElementById('results-area');
+  if(!area || !state.currentSetId) return;
+  try{
+    const [set, subs] = await Promise.all([
+      fetchSetById(state.currentSetId),
+      fetchSubmissions(state.currentSetId)
+    ]);
+    if(!set){ area.innerHTML = `<div class="empty-state">세트를 찾을 수 없어요.</div>`; return; }
+    const link = location.origin + location.pathname + '?set=' + set.id;
+    const rows = subs.map(s => `
+      <tr>
+        <td>${escapeHtml(s.studentName)}</td>
+        <td>${s.score} / ${s.total}</td>
+        <td>${s.total ? Math.round(s.score/s.total*100) : 0}%</td>
+      </tr>`).join('');
+    area.innerHTML = `
+      <div class="eyebrow">결과 보기</div>
+      <h2>${escapeHtml(set.title||'(제목 없음)')}</h2>
+      <p class="muted">학생 공유 코드 <span class="code-pill">${escapeHtml(set.code)}</span> · 총 빈칸 ${blankCount(set.segments||[])}개</p>
+      <div class="example-box">학생 링크: ${escapeHtml(link)}</div>
+      <div style="margin-top:18px;">
+        ${subs.length === 0
+          ? `<div class="empty-state">아직 제출한 학생이 없어요.</div>`
+          : `<table><thead><tr><th>이름</th><th>점수</th><th>정답률</th></tr></thead><tbody>${rows}</tbody></table>`}
+      </div>`;
+  }catch(e){
+    area.innerHTML = `<div class="banner banner-error">결과를 불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+/* ---- STUDENT: ENTRY ---- */
+function renderStudentEntryShell(){
+  return `
+  ${renderBackRow()}
+  <div class="card">
+    <div class="eyebrow">딕테이션 풀기</div>
+    <h2>코드와 이름을 입력하세요</h2>
+    <label class="field">
+      <span class="flabel">세트 코드</span>
+      <input class="input" id="f-code" placeholder="예: 7K9X2P" style="text-transform:uppercase;">
+    </label>
+    <label class="field">
+      <span class="flabel">이름</span>
+      <input class="input" id="f-name" placeholder="이름을 입력하세요">
+    </label>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-enter-quiz">시작하기</button>
+    </div>
+    <div id="entry-status"></div>
+  </div>`;
+}
+
+/* ---- STUDENT: QUIZ ---- */
+function renderStudentQuiz(){
+  const set = state.currentSet;
+  if(!set) return `<div class="empty-state">세트 정보를 불러오는 중이에요...</div>`;
+  const bodyHtml = set.segments.map(seg => {
+    if(seg.type === 'text') return renderTextSegment(seg.value);
+    const width = Math.max(4, seg.answer.length + 2);
+    return `<input class="blank-input" data-blank="${seg.index}" style="width:${width}ch" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">`;
+  }).join('');
+
+  return `
+  ${renderBackRow('home')}
+  <div class="listen-panel">
+    <div class="waveform" id="waveform">
+      ${Array.from({length:24}).map(()=>'<span class="wbar"></span>').join('')}
+    </div>
+    <audio id="quiz-audio" controls src="${escapeHtml(set.audioUrl||'')}"></audio>
+    <div class="listen-controls">
+      <button class="btn btn-ghost" id="btn-replay">🔁 처음부터</button>
+      <span style="color:#cfd6e8; font-size:0.8rem;">재생 속도</span>
+      <select id="playback-rate">
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px;">
+    <h3 style="margin-bottom:2px;">${escapeHtml(set.title||'')}</h3>
+    <p class="muted" style="margin-bottom:14px;">빈칸에 들리는 단어를 입력하세요. (대소문자는 채점에 영향 없어요)</p>
+    <div class="script-box">${bodyHtml}</div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btn-submit-quiz">제출하고 채점하기</button>
+  </div>
+  <div id="quiz-status"></div>`;
+}
+
+/* ---- STUDENT: RESULT ---- */
+function renderStudentResult(){
+  const g = state.lastGrade;
+  const set = state.currentSet;
+  if(!g || !set) return `<div class="empty-state">결과가 없어요.</div>`;
+  const bodyHtml = set.segments.map(seg => {
+    if(seg.type === 'text') return renderTextSegment(seg.value);
+    const given = g.answersByIndex[seg.index] || '';
+    const isCorrect = normalize(given) === normalize(seg.answer);
+    const width = Math.max(4, seg.answer.length + 2);
+    const cls = isCorrect ? 'correct' : 'wrong';
+    const tag = isCorrect ? '' : `<span class="answer-tag">${escapeHtml(seg.answer)}</span>`;
+    return `<input class="blank-input ${cls}" style="width:${width}ch" value="${escapeHtml(given)}" disabled>${tag}`;
+  }).join('');
+
+  return `
+  ${renderBackRow('home')}
+  <div class="card">
+    <div class="score-hero">
+      <div class="score-num">${g.score} / ${g.total}</div>
+      <div class="score-label">정답률 ${g.total ? Math.round(g.score/g.total*100) : 0}% · ${escapeHtml(state.studentName)}님, 수고했어요!</div>
+    </div>
+    <div class="script-box" style="margin-top:10px;">${bodyHtml}</div>
+  </div>`;
+}
+
+/* ---- 공통 조각 ---- */
+function renderBackRow(target){
+  return `<div class="backrow"><button class="backlink" data-go="${target||'home'}">← 처음으로</button></div>`;
+}
+
+/* =========================================================
+   6. 이벤트 바인딩
+   ========================================================= */
+function attachHandlers(){
+  document.querySelectorAll('[data-go]').forEach(el => {
+    el.addEventListener('click', () => { state.banner = null; goto(el.dataset.go); });
+  });
+
+  // 라디오: 음원 입력 방식 전환
+  document.querySelectorAll('input[name="audioMode"]').forEach(r => {
+    r.addEventListener('change', (e) => { state.audioMode = e.target.value; render(); });
+  });
+
+  // Word(.docx) 파일에서 스크립트 가져오기
+  const docxBtn = document.getElementById('btn-docx-import');
+  const docxFileInput = document.getElementById('f-docx-file');
+  if(docxBtn && docxFileInput){
+    docxBtn.addEventListener('click', () => docxFileInput.click());
+    docxFileInput.addEventListener('change', async () => {
+      const file = docxFileInput.files[0];
+      if(!file) return;
+      const statusEl = document.getElementById('create-status');
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      try{
+        const script = await docxToScript(file);
+        const blanks = parseScript(script).filter(s=>s.type==='blank').length;
+        document.getElementById('f-script').value = script;
+        statusEl.innerHTML = blanks > 0
+          ? `<div class="banner banner-success">밑줄 친 단어 ${blanks}개를 빈칸으로 자동 변환했어요. 스크립트를 한 번 확인하고, 이상한 부분은 직접 고쳐주세요.</div>`
+          : `<div class="banner banner-warn">밑줄 친 부분을 찾지 못했어요. 스크립트를 불러오긴 했는데, 빈칸은 직접 { }로 표시해주세요.</div>`;
+      }catch(e){
+        statusEl.innerHTML = `<div class="banner banner-error">Word 파일을 읽지 못했어요: ${escapeHtml(e.message)}</div>`;
+      }
+      docxFileInput.value = '';
+    });
+  }
+
+  // 세트 생성
+  const createBtn = document.getElementById('btn-create-set');
+  if(createBtn){
+    createBtn.addEventListener('click', async () => {
+      const title = document.getElementById('f-title').value.trim();
+      const script = document.getElementById('f-script').value;
+      const statusEl = document.getElementById('create-status');
+      if(!title || !script.trim()){
+        statusEl.innerHTML = `<div class="banner banner-error">제목과 스크립트를 모두 입력해주세요.</div>`;
+        return;
+      }
+      if(parseScript(script).filter(s=>s.type==='blank').length === 0){
+        statusEl.innerHTML = `<div class="banner banner-error">{ } 로 표시된 빈칸이 하나도 없어요.</div>`;
+        return;
+      }
+      createBtn.disabled = true;
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      try{
+        let audioUrl = '';
+        if(state.audioMode === 'url'){
+          audioUrl = document.getElementById('f-audio-url').value.trim();
+        } else {
+          if(!storage){
+            statusEl.innerHTML = `<div class="banner banner-error">Storage가 설정되지 않았어요. 'URL 입력'을 선택해서 mp3 링크(예: GitHub에 올린 audio/파일명.mp3)를 입력해주세요.</div>`;
+            createBtn.disabled = false;
+            return;
+          }
+          const fileInput = document.getElementById('f-audio-file');
+          if(fileInput.files[0]){
+            statusEl.innerHTML = `<div class="banner banner-warn">음원 업로드 중이에요... (파일 크기에 따라 시간이 걸릴 수 있어요)</div>`;
+            audioUrl = await uploadAudioFile(fileInput.files[0]);
+          }
+        }
+        if(!audioUrl){
+          statusEl.innerHTML = `<div class="banner banner-error">음원 URL을 입력하거나 파일을 선택해주세요.</div>`;
+          createBtn.disabled = false;
+          return;
+        }
+        const { code } = await createSet(title, script, audioUrl);
+        statusEl.innerHTML = `<div class="banner banner-success">세트가 만들어졌어요! 학생 공유 코드: <b>${code}</b></div>`;
+        setTimeout(() => goto('teacherSets'), 900);
+      }catch(e){
+        statusEl.innerHTML = `<div class="banner banner-error">저장 중 오류가 발생했어요: ${escapeHtml(e.message)}</div>`;
+        createBtn.disabled = false;
+      }
+    });
+  }
+
+  // 학생 입장
+  const enterBtn = document.getElementById('btn-enter-quiz');
+  if(enterBtn){
+    enterBtn.addEventListener('click', async () => {
+      const code = document.getElementById('f-code').value.trim();
+      const name = document.getElementById('f-name').value.trim();
+      const statusEl = document.getElementById('entry-status');
+      if(!code || !name){
+        statusEl.innerHTML = `<div class="banner banner-error">코드와 이름을 모두 입력해주세요.</div>`;
+        return;
+      }
+      enterBtn.disabled = true;
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      try{
+        const set = await fetchSetByCode(code);
+        if(!set){
+          statusEl.innerHTML = `<div class="banner banner-error">해당 코드의 딕테이션을 찾을 수 없어요. 코드를 다시 확인해주세요.</div>`;
+          enterBtn.disabled = false;
+          return;
+        }
+        state.studentName = name;
+        goto('studentQuiz', { currentSet: set, currentSetId: set.id });
+      }catch(e){
+        statusEl.innerHTML = `<div class="banner banner-error">오류가 발생했어요: ${escapeHtml(e.message)}</div>`;
+        enterBtn.disabled = false;
+      }
+    });
+  }
+
+  // 퀴즈 화면: 오디오 컨트롤
+  const audioEl = document.getElementById('quiz-audio');
+  const waveEl = document.getElementById('waveform');
+  if(audioEl){
+    audioEl.addEventListener('play', () => waveEl && waveEl.classList.add('playing'));
+    audioEl.addEventListener('pause', () => waveEl && waveEl.classList.remove('playing'));
+    audioEl.addEventListener('ended', () => waveEl && waveEl.classList.remove('playing'));
+    const replayBtn = document.getElementById('btn-replay');
+    if(replayBtn) replayBtn.addEventListener('click', () => { audioEl.currentTime = 0; audioEl.play(); });
+    const rateSel = document.getElementById('playback-rate');
+    if(rateSel) rateSel.addEventListener('change', () => { audioEl.playbackRate = parseFloat(rateSel.value); });
+  }
+
+  // 퀴즈 제출 → 채점
+  const submitBtn = document.getElementById('btn-submit-quiz');
+  if(submitBtn){
+    submitBtn.addEventListener('click', async () => {
+      const set = state.currentSet;
+      const inputs = document.querySelectorAll('.blank-input[data-blank]');
+      const answersByIndex = {};
+      inputs.forEach(inp => { answersByIndex[inp.dataset.blank] = inp.value; });
+
+      let score = 0, total = 0;
+      set.segments.filter(s=>s.type==='blank').forEach(seg => {
+        total++;
+        if(normalize(answersByIndex[seg.index]) === normalize(seg.answer)) score++;
+      });
+
+      submitBtn.disabled = true;
+      const statusEl = document.getElementById('quiz-status');
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      try{
+        await saveSubmission(state.currentSetId, state.studentName, score, total, answersByIndex);
+        state.lastGrade = { score, total, answersByIndex };
+        goto('studentResult');
+      }catch(e){
+        statusEl.innerHTML = `<div class="banner banner-error">채점 결과 저장 중 오류: ${escapeHtml(e.message)}</div>`;
+        submitBtn.disabled = false;
+      }
+    });
+  }
+}
+
+/* =========================================================
+   7. 시작 — URL에 ?set=문서ID 가 있으면 학생 화면으로 바로 진입
+   ========================================================= */
+async function boot(){
+  render();
+  if(CONFIG_IS_PLACEHOLDER) return;
+  const params = new URLSearchParams(location.search);
+  const setId = params.get('set');
+  if(setId){
+    const area = document.getElementById('app');
+    try{
+      const set = await fetchSetById(setId);
+      if(set){
+        const name = prompt('이름을 입력하세요');
+        if(name && name.trim()){
+          state.studentName = name.trim();
+          goto('studentQuiz', { currentSet: set, currentSetId: set.id });
+          return;
+        }
+      }
+    }catch(e){ /* fall through to home */ }
+    goto('home');
+  }
+}
+boot();
+</script>
+</body>
+</html>
