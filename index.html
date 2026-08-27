@@ -181,10 +181,22 @@
   .empty-state{ text-align:center; padding: 30px 10px; color: var(--ink-soft); }
   .spinner{ width:22px;height:22px;border-radius:50%;border:3px solid var(--line); border-top-color: var(--navy); animation: spin .7s linear infinite; margin: 20px auto; }
   @keyframes spin{ to{ transform: rotate(360deg);} }
+
+  /* ---- Print (결과 인쇄 / PDF 저장) ---- */
+  #print-area{ display:none; }
+  @media print{
+    body{ background:#fff; }
+    .app-header, .backrow, .btn-row, .banner{ display:none !important; }
+    .card{ box-shadow:none; border:1px solid #ccc; }
+    body.printing-batch #app{ display:none !important; }
+    body.printing-batch #print-area{ display:block !important; max-width:760px; margin:0 auto; padding:20px; }
+    .print-page + .print-page{ page-break-before: always; }
+  }
 </style>
 </head>
 <body>
 <div id="app"></div>
+<div id="print-area"></div>
 
 <script>
 /* =========================================================
@@ -207,7 +219,7 @@ if (!CONFIG_IS_PLACEHOLDER) {
   try { storage = firebase.storage(); } catch(e) { storage = null; } // Storage 미설정이어도 Firestore는 정상 동작
 }
 
-// 선생님 모드 비밀번호
+// 선생님 모드 비밀번호 — 원하는 값으로 바꿔서 쓰세요 (보안용이 아니라 학생들이 실수로 못 들어오게 하는 정도예요)
 const TEACHER_PASSWORD = "0486";
 
 /* =========================================================
@@ -262,9 +274,11 @@ function blankCount(segments){
   return segments.filter(s => s.type === 'blank').length;
 }
 
-// Word(.docx) 내부 XML을 직접 읽어서 처리
+// Word(.docx) 내부 XML을 직접 읽어서 처리 (mammoth 대신 — 음영/하이라이트, 잘게 쪼개진 밑줄 단어를 정확히 잡기 위함)
 const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const AUDIO_FILENAME_RE = /^([\w\-]+\.(mp3|wav|m4a|ogg))$/i;
+// Word 안에 적힌 파일명(예: CH6_2D.mp3) 앞에 붙여서 실제 업로드한 파일명과 맞출 접두사
+const AUDIO_FILENAME_PREFIX = "Decoding TOEFL LInter_";
 
 function docxIsUnderlined(rPr){
   if(!rPr) return false;
@@ -360,13 +374,26 @@ async function docxToScripts(file){
     let audioUrl = '';
     if(lines.length){
       const m = AUDIO_FILENAME_RE.exec(lines[0].trim());
-      if(m){ audioUrl = 'audio/' + m[1]; lines.shift(); }
+      if(m){ audioUrl = 'audio/' + encodeURIComponent(AUDIO_FILENAME_PREFIX + m[1]); lines.shift(); }
     }
     return { title: s.title, script: lines.join('\n').trim(), audioUrl };
   }).filter(s => s.script);
 }
 function renderTextSegment(value){
   return escapeHtml(value).replace(/\n/g, '<br>');
+}
+// segments + 학생이 입력한 answers를 채점된 스크립트 HTML로 변환 (학생 결과 화면 · 교사 인쇄에서 공용)
+function renderGradedScriptHtml(segments, answersByIndex){
+  answersByIndex = answersByIndex || {};
+  return (segments||[]).map(seg => {
+    if(seg.type === 'text') return renderTextSegment(seg.value);
+    const given = answersByIndex[seg.index] || '';
+    const isCorrect = normalize(given) === normalize(seg.answer);
+    const width = Math.max(4, seg.answer.length + 2);
+    const cls = isCorrect ? 'correct' : 'wrong';
+    const tag = isCorrect ? '' : `<span class="answer-tag">${escapeHtml(seg.answer)}</span>`;
+    return `<input class="blank-input ${cls}" style="width:${width}ch" value="${escapeHtml(given)}" disabled>${tag}`;
+  }).join('');
 }
 function setBanner(type, msg){ state.banner = {type, msg}; }
 
@@ -449,7 +476,7 @@ function renderHeader(){
   <div class="app-header">
     <div class="brand-mark"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span></div>
     <div>
-      <div class="app-title">Dictation 자동채점</div>
+      <div class="app-title">딕테이션 자동채점</div>
     </div>
   </div>`;
 }
@@ -496,7 +523,7 @@ function renderHome(){
     <button class="role-card" data-go="studentEntry">
       <span class="emoji">✏️</span>
       <h3>학생</h3>
-      <p>코드를 입력하고 딕테이션을 풀어요.</p>
+      <p>선생님이 알려주신 코드를 입력하고 딕테이션을 풀어요.</p>
     </button>
   </div>`;
 }
@@ -687,8 +714,9 @@ async function loadTeacherResults(){
     ]);
     if(!set){ area.innerHTML = `<div class="empty-state">세트를 찾을 수 없어요.</div>`; return; }
     const link = location.origin + location.pathname + '?set=' + set.id;
-    const rows = subs.map(s => `
+    const rows = subs.map((s,i) => `
       <tr>
+        <td><input type="checkbox" class="sub-select" data-idx="${i}"></td>
         <td>${escapeHtml(s.studentName)}</td>
         <td>${s.score} / ${s.total}</td>
         <td>${s.total ? Math.round(s.score/s.total*100) : 0}%</td>
@@ -701,8 +729,38 @@ async function loadTeacherResults(){
       <div style="margin-top:18px;">
         ${subs.length === 0
           ? `<div class="empty-state">아직 제출한 학생이 없어요.</div>`
-          : `<table><thead><tr><th>이름</th><th>점수</th><th>정답률</th></tr></thead><tbody>${rows}</tbody></table>`}
+          : `<table><thead><tr><th><input type="checkbox" id="select-all-subs"></th><th>이름</th><th>점수</th><th>정답률</th></tr></thead><tbody>${rows}</tbody></table>
+             <div class="btn-row" style="margin-top:14px;">
+               <button class="btn btn-primary" id="btn-print-selected">🖨️ 선택한 학생 결과 인쇄 / PDF</button>
+             </div>`}
       </div>`;
+    const selectAllCb = document.getElementById('select-all-subs');
+    if(selectAllCb){
+      selectAllCb.addEventListener('change', () => {
+        document.querySelectorAll('.sub-select').forEach(cb => { cb.checked = selectAllCb.checked; });
+      });
+    }
+    const printSelectedBtn = document.getElementById('btn-print-selected');
+    if(printSelectedBtn){
+      printSelectedBtn.addEventListener('click', () => {
+        const idxs = Array.from(document.querySelectorAll('.sub-select:checked')).map(cb => parseInt(cb.dataset.idx, 10));
+        if(idxs.length === 0){ alert('인쇄할 학생을 먼저 선택해주세요.'); return; }
+        const selectedSubs = idxs.map(i => subs[i]);
+        const pagesHtml = selectedSubs.map(s => `
+          <div class="print-page card">
+            <h2>${escapeHtml(set.title||'')}</h2>
+            <div class="score-hero">
+              <div class="score-num">${s.score} / ${s.total}</div>
+              <div class="score-label">정답률 ${s.total ? Math.round(s.score/s.total*100) : 0}% · ${escapeHtml(s.studentName)}</div>
+            </div>
+            <div class="script-box" style="margin-top:10px;">${renderGradedScriptHtml(set.segments, s.answers)}</div>
+          </div>
+        `).join('');
+        document.getElementById('print-area').innerHTML = pagesHtml;
+        document.body.classList.add('printing-batch');
+        window.print();
+      });
+    }
   }catch(e){
     area.innerHTML = `<div class="banner banner-error">결과를 불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
   }
@@ -837,15 +895,7 @@ function renderStudentResult(){
   const g = state.lastGrade;
   const set = state.currentSet;
   if(!g || !set) return `<div class="empty-state">결과가 없어요.</div>`;
-  const bodyHtml = set.segments.map(seg => {
-    if(seg.type === 'text') return renderTextSegment(seg.value);
-    const given = g.answersByIndex[seg.index] || '';
-    const isCorrect = normalize(given) === normalize(seg.answer);
-    const width = Math.max(4, seg.answer.length + 2);
-    const cls = isCorrect ? 'correct' : 'wrong';
-    const tag = isCorrect ? '' : `<span class="answer-tag">${escapeHtml(seg.answer)}</span>`;
-    return `<input class="blank-input ${cls}" style="width:${width}ch" value="${escapeHtml(given)}" disabled>${tag}`;
-  }).join('');
+  const bodyHtml = renderGradedScriptHtml(set.segments, g.answersByIndex);
 
   return `
   ${renderBackRow('home')}
@@ -855,6 +905,9 @@ function renderStudentResult(){
       <div class="score-label">정답률 ${g.total ? Math.round(g.score/g.total*100) : 0}% · ${escapeHtml(state.studentName)}님, 수고했어요!</div>
     </div>
     <div class="script-box" style="margin-top:10px;">${bodyHtml}</div>
+  </div>
+  <div class="btn-row" style="margin-top:16px;">
+    <button class="btn btn-ghost" id="btn-print-result">🖨️ 인쇄 / PDF로 저장</button>
   </div>`;
 }
 
@@ -1130,6 +1183,11 @@ function attachHandlers(){
       }
     });
   }
+  // 결과 화면: 인쇄 / PDF 저장
+  const printBtn = document.getElementById('btn-print-result');
+  if(printBtn){
+    printBtn.addEventListener('click', () => window.print());
+  }
 }
 
 /* =========================================================
@@ -1157,6 +1215,11 @@ async function boot(){
   }
 }
 boot();
+window.addEventListener('afterprint', () => {
+  document.body.classList.remove('printing-batch');
+  const pa = document.getElementById('print-area');
+  if(pa) pa.innerHTML = '';
+});
 </script>
 </body>
 </html>
