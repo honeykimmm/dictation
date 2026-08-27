@@ -97,8 +97,8 @@
   .eyebrow{ font-size:0.72rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color: var(--amber); margin-bottom:4px; }
 
   /* ---- Tabs ---- */
-  .tabs{ display:flex; gap:8px; margin-bottom:18px; }
-  .tab-btn{ flex:1; background: var(--paper); border:1px solid var(--line); padding:10px 12px; border-radius:10px; font-weight:700; font-size:0.88rem; color: var(--ink-soft); }
+  .tabs{ display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+  .tab-btn{ flex:1; min-width:120px; background: var(--paper); border:1px solid var(--line); padding:10px 12px; border-radius:10px; font-weight:700; font-size:0.88rem; color: var(--ink-soft); }
   .tab-btn.active{ background: var(--navy); color:#fff; border-color: var(--navy); }
 
   /* ---- Forms ---- */
@@ -219,8 +219,11 @@ if (!CONFIG_IS_PLACEHOLDER) {
   try { storage = firebase.storage(); } catch(e) { storage = null; } // Storage 미설정이어도 Firestore는 정상 동작
 }
 
-// 선생님 모드 비밀번호 — 원하는 값으로 바꿔서 쓰세요 (보안용이 아니라 학생들이 실수로 못 들어오게 하는 정도예요)
-const TEACHER_PASSWORD = "0486";
+// 선생님 목록 — 이름·비밀번호를 원하는 값으로 바꾸거나 필요한 만큼 추가하세요 (보안용이 아니라 학생들이 실수로 못 들어오게 하는 정도예요)
+const TEACHERS = [
+  { name: "김현채", password: "0486" },
+  { name: "선생님2", password: "0000" }
+];
 
 /* =========================================================
    2. 상태
@@ -230,12 +233,13 @@ const state = {
   currentSet: null,   // {id, code, title, segments, audioUrl}
   currentSetId: null,
   studentName: '',
+  studentTeacherName: '',
   lastGrade: null,    // {score, total, segments(graded)}
   banner: null,
   audioMode: 'url',   // url | upload
   bulkSets: [],       // Word 일괄 가져오기로 인식된 세트 목록
   importDraft: { title:'', script:'', audioUrl:'' }, // 단일 세트 화면에서 Word로 가져온 값 프리필용
-  teacherUnlocked: false
+  currentTeacherName: null
 };
 
 /* =========================================================
@@ -439,15 +443,34 @@ async function fetchSetByCode(code){
   const d = snap.docs[0];
   return { id: d.id, ...d.data() };
 }
-async function saveSubmission(setId, studentName, score, total, answers){
+async function saveSubmission(setId, studentName, teacherName, score, total, answers){
   await db.collection('dictationSets').doc(setId).collection('submissions').add({
-    studentName, score, total, answers,
+    studentName, teacherName, score, total, answers,
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
   });
 }
 async function fetchSubmissions(setId){
   const snap = await db.collection('dictationSets').doc(setId).collection('submissions').orderBy('score','desc').get();
   return snap.docs.map(d => ({ id:d.id, ...d.data() }));
+}
+// 특정 학생(같은 선생님 소속)이 지금까지 제출한 모든 세트의 결과를 모아서 가져오기 (리포트 카드용)
+async function fetchStudentSubmissions(studentName, teacherName){
+  const snap = await db.collectionGroup('submissions')
+    .where('studentName', '==', studentName)
+    .where('teacherName', '==', teacherName)
+    .get();
+  const rows = snap.docs.map(d => ({ id: d.id, setId: d.ref.parent.parent.id, ...d.data() }));
+  const uniqueSetIds = [...new Set(rows.map(r => r.setId))];
+  const setDocs = await Promise.all(uniqueSetIds.map(id => fetchSetById(id)));
+  const titleById = {};
+  uniqueSetIds.forEach((id, i) => { titleById[id] = setDocs[i] ? setDocs[i].title : '(삭제된 세트)'; });
+  rows.forEach(r => { r.setTitle = titleById[r.setId] || '(삭제된 세트)'; });
+  rows.sort((a,b) => {
+    const ta = a.createdAt && a.createdAt.toMillis ? a.createdAt.toMillis() : 0;
+    const tb = b.createdAt && b.createdAt.toMillis ? b.createdAt.toMillis() : 0;
+    return ta - tb;
+  });
+  return rows;
 }
 async function uploadAudioFile(file){
   const path = 'dictation-audio/' + Date.now() + '_' + file.name.replace(/[^\w.\-]/g,'_');
@@ -502,6 +525,7 @@ function renderView(){
     case 'teacherCreate': return renderTeacherCreate();
     case 'teacherBulkImport': return renderTeacherBulkImport();
     case 'teacherSets': return renderTeacherSets();
+    case 'teacherStudentReport': return renderTeacherStudentReport();
     case 'teacherEditSet': return renderTeacherEditSetShell();
     case 'teacherResults': return renderTeacherResultsShell();
     case 'studentEntry': return renderStudentEntryShell();
@@ -520,7 +544,7 @@ function renderHome(){
       <h3>선생님</h3>
       <p>새 딕테이션을 만들거나, 만들어둔 세트와 학생 결과를 확인해요.</p>
     </button>
-    <button class="role-card" data-go="studentEntry">
+    <button class="role-card" id="btn-enter-student">
       <span class="emoji">✏️</span>
       <h3>학생</h3>
       <p>선생님이 알려주신 코드를 입력하고 딕테이션을 풀어요.</p>
@@ -634,10 +658,12 @@ function renderBulkSetsList(){
 
 function renderTeacherTabs(active){
   return `
+  <p class="muted" style="margin-bottom:8px;">👤 ${escapeHtml(state.currentTeacherName||'')} 선생님으로 로그인됨</p>
   <div class="tabs">
     <button class="tab-btn ${active==='create'?'active':''}" data-go="teacherCreate">새로 만들기</button>
     <button class="tab-btn ${active==='bulk'?'active':''}" data-go="teacherBulkImport">여러 개 가져오기</button>
     <button class="tab-btn ${active==='sets'?'active':''}" data-go="teacherSets">세트 · 결과 보기</button>
+    <button class="tab-btn ${active==='report'?'active':''}" data-go="teacherStudentReport">학생 리포트</button>
   </div>`;
 }
 function renderTeacherSets(){
@@ -708,10 +734,11 @@ async function loadTeacherResults(){
   const area = document.getElementById('results-area');
   if(!area || !state.currentSetId) return;
   try{
-    const [set, subs] = await Promise.all([
+    const [set, allSubs] = await Promise.all([
       fetchSetById(state.currentSetId),
       fetchSubmissions(state.currentSetId)
     ]);
+    const subs = allSubs.filter(s => s.teacherName === state.currentTeacherName);
     if(!set){ area.innerHTML = `<div class="empty-state">세트를 찾을 수 없어요.</div>`; return; }
     const link = location.origin + location.pathname + '?set=' + set.id;
     const rows = subs.map((s,i) => `
@@ -728,7 +755,7 @@ async function loadTeacherResults(){
       <div class="example-box">학생 링크: ${escapeHtml(link)}</div>
       <div style="margin-top:18px;">
         ${subs.length === 0
-          ? `<div class="empty-state">아직 제출한 학생이 없어요.</div>`
+          ? `<div class="empty-state">아직 우리 반 학생 중 제출한 사람이 없어요.</div>`
           : `<table><thead><tr><th><input type="checkbox" id="select-all-subs"></th><th>이름</th><th>점수</th><th>정답률</th></tr></thead><tbody>${rows}</tbody></table>
              <div class="btn-row" style="margin-top:14px;">
                <button class="btn btn-primary" id="btn-print-selected">🖨️ 선택한 학생 결과 인쇄 / PDF</button>
@@ -828,17 +855,77 @@ async function loadTeacherEditSet(){
   }
 }
 
+/* ---- TEACHER: STUDENT REPORT CARD ---- */
+function renderTeacherStudentReport(){
+  return `
+  ${renderBackRow()}
+  ${renderTeacherTabs('report')}
+  <div class="card" style="margin-bottom:18px;">
+    <div class="eyebrow">학생 리포트 카드</div>
+    <h2>학생 이름으로 조회</h2>
+    <label class="field" style="margin-bottom:12px;">
+      <span class="flabel">학생 이름</span>
+      <input class="input" id="f-report-name" placeholder="학생이 입력했던 이름 그대로 입력">
+    </label>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-load-report">조회하기</button>
+    </div>
+    <div id="report-status"></div>
+  </div>
+  <div id="report-area"></div>`;
+}
+function renderReportTable(studentName, rows){
+  const tableRows = rows.map((r,i) => {
+    const dateStr = r.createdAt && r.createdAt.toDate ? r.createdAt.toDate().toLocaleDateString('ko-KR') : '-';
+    return `
+    <tr>
+      <td>${i+1}</td>
+      <td>${escapeHtml(dateStr)}</td>
+      <td>${escapeHtml(r.setTitle)}</td>
+      <td>${r.score} / ${r.total}</td>
+      <td><input type="text" class="input report-quiz-score" style="width:80px; padding:5px 8px;" placeholder="-"></td>
+    </tr>`;
+  }).join('');
+  return `
+  <div class="card">
+    <h2 style="margin-bottom:14px;">${escapeHtml(studentName)} 학생 리포트</h2>
+    <table>
+      <thead>
+        <tr><th>번호</th><th>날짜</th><th>딕테이션 제목</th><th>딕테이션 점수</th><th>문제풀이 점수</th></tr>
+      </thead>
+      <tbody>${tableRows}</tbody>
+    </table>
+    <div style="margin-top:24px;">
+      <div class="flabel" style="margin-bottom:6px;">Comment</div>
+      <textarea class="input" id="report-comment" style="min-height:100px;" placeholder="인쇄 전에 코멘트를 입력하세요"></textarea>
+    </div>
+    <div class="btn-row" style="margin-top:16px;">
+      <button class="btn btn-ghost" id="btn-print-report">🖨️ 리포트 인쇄 / PDF</button>
+    </div>
+  </div>`;
+}
+
 /* ---- STUDENT: ENTRY ---- */
 function renderStudentEntryShell(){
+  const viaLink = !!state.currentSet;
+  const teacherOptions = TEACHERS.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)} 선생님</option>`).join('');
   return `
   ${renderBackRow()}
   <div class="card">
     <div class="eyebrow">딕테이션 풀기</div>
-    <h2>코드와 이름을 입력하세요</h2>
+    <h2>${viaLink ? escapeHtml(state.currentSet.title||'') : '선생님·코드·이름을 입력하세요'}</h2>
+    <label class="field">
+      <span class="flabel">우리 선생님</span>
+      <select class="input" id="f-teacher-select">
+        <option value="">선택하세요</option>
+        ${teacherOptions}
+      </select>
+    </label>
+    ${viaLink ? '' : `
     <label class="field">
       <span class="flabel">세트 코드</span>
       <input class="input" id="f-code" placeholder="예: 7K9X2P" style="text-transform:uppercase;">
-    </label>
+    </label>`}
     <label class="field">
       <span class="flabel">이름</span>
       <input class="input" id="f-name" placeholder="이름을 입력하세요">
@@ -929,15 +1016,16 @@ function attachHandlers(){
   if(enterTeacherBtn){
     enterTeacherBtn.addEventListener('click', () => {
       state.banner = null;
-      goto(state.teacherUnlocked ? 'teacherCreate' : 'teacherAuth');
+      goto(state.currentTeacherName ? 'teacherCreate' : 'teacherAuth');
     });
   }
   const teacherAuthBtn = document.getElementById('btn-teacher-auth');
   const teacherPwInput = document.getElementById('f-teacher-pw');
   if(teacherAuthBtn && teacherPwInput){
     const tryAuth = () => {
-      if(teacherPwInput.value === TEACHER_PASSWORD){
-        state.teacherUnlocked = true;
+      const match = TEACHERS.find(t => t.password === teacherPwInput.value);
+      if(match){
+        state.currentTeacherName = match.name;
         goto('teacherCreate');
       } else {
         document.getElementById('teacher-auth-status').innerHTML = `<div class="banner banner-error">비밀번호가 틀렸어요.</div>`;
@@ -945,6 +1033,15 @@ function attachHandlers(){
     };
     teacherAuthBtn.addEventListener('click', tryAuth);
     teacherPwInput.addEventListener('keydown', (e) => { if(e.key === 'Enter') tryAuth(); });
+  }
+
+  // 학생 카드: 직접 들어올 때는 이전에 남아있던 링크용 세트 정보를 초기화
+  const enterStudentBtn = document.getElementById('btn-enter-student');
+  if(enterStudentBtn){
+    enterStudentBtn.addEventListener('click', () => {
+      state.banner = null;
+      goto('studentEntry', { currentSet: null, currentSetId: null });
+    });
   }
 
   // 라디오: 음원 입력 방식 전환
@@ -1064,6 +1161,62 @@ function attachHandlers(){
     });
   }
 
+  // 학생 리포트 카드 조회
+  const loadReportBtn = document.getElementById('btn-load-report');
+  if(loadReportBtn){
+    loadReportBtn.addEventListener('click', async () => {
+      const name = document.getElementById('f-report-name').value.trim();
+      const statusEl = document.getElementById('report-status');
+      const areaEl = document.getElementById('report-area');
+      if(!name){ statusEl.innerHTML = `<div class="banner banner-error">학생 이름을 입력해주세요.</div>`; return; }
+      loadReportBtn.disabled = true;
+      statusEl.innerHTML = `<div class="spinner"></div>`;
+      areaEl.innerHTML = '';
+      try{
+        const rows = await fetchStudentSubmissions(name, state.currentTeacherName);
+        loadReportBtn.disabled = false;
+        if(rows.length === 0){
+          statusEl.innerHTML = `<div class="banner banner-warn">해당 이름으로 제출된 기록이 없어요. 이름 철자를 확인해보세요.</div>`;
+          return;
+        }
+        statusEl.innerHTML = '';
+        areaEl.innerHTML = renderReportTable(name, rows);
+        const printReportBtn = document.getElementById('btn-print-report');
+        if(printReportBtn){
+          printReportBtn.addEventListener('click', () => {
+            const quizScores = Array.from(document.querySelectorAll('.report-quiz-score')).map(inp => inp.value.trim());
+            const comment = document.getElementById('report-comment').value.trim();
+            const tableRowsHtml = rows.map((r,i) => {
+              const dateStr = r.createdAt && r.createdAt.toDate ? r.createdAt.toDate().toLocaleDateString('ko-KR') : '-';
+              return `<tr><td>${i+1}</td><td>${escapeHtml(dateStr)}</td><td>${escapeHtml(r.setTitle)}</td><td>${r.score} / ${r.total}</td><td>${escapeHtml(quizScores[i]||'')}</td></tr>`;
+            }).join('');
+            const printHtml = `
+              <div class="print-page card">
+                <h2>${escapeHtml(name)} 학생 리포트</h2>
+                <table>
+                  <thead><tr><th>번호</th><th>날짜</th><th>딕테이션 제목</th><th>딕테이션 점수</th><th>문제풀이 점수</th></tr></thead>
+                  <tbody>${tableRowsHtml}</tbody>
+                </table>
+                <div style="margin-top:24px;">
+                  <div style="font-weight:700; margin-bottom:6px;">Comment</div>
+                  <div style="border:1px solid #ccc; border-radius:8px; padding:12px; min-height:80px; white-space:pre-wrap;">${escapeHtml(comment)}</div>
+                </div>
+              </div>`;
+            document.getElementById('print-area').innerHTML = printHtml;
+            document.body.classList.add('printing-batch');
+            window.print();
+          });
+        }
+      }catch(e){
+        loadReportBtn.disabled = false;
+        const msg = (e && e.message) || String(e);
+        const urlMatch = msg.match(/https:\/\/[^\s]+/);
+        const linkHtml = urlMatch ? `<br><a href="${escapeHtml(urlMatch[0])}" target="_blank" rel="noopener">여기를 눌러 색인 만들기</a>` : '';
+        statusEl.innerHTML = `<div class="banner banner-error">조회 중 오류가 발생했어요. Firestore에 색인(index)이 필요할 수 있어요.${linkHtml}<br>${escapeHtml(msg)}</div>`;
+      }
+    });
+  }
+
   // 세트 생성
   const createBtn = document.getElementById('btn-create-set');
   if(createBtn){
@@ -1117,11 +1270,26 @@ function attachHandlers(){
   const enterBtn = document.getElementById('btn-enter-quiz');
   if(enterBtn){
     enterBtn.addEventListener('click', async () => {
-      const code = document.getElementById('f-code').value.trim();
+      const teacherSelect = document.getElementById('f-teacher-select');
+      const teacherName = teacherSelect ? teacherSelect.value : '';
       const name = document.getElementById('f-name').value.trim();
       const statusEl = document.getElementById('entry-status');
-      if(!code || !name){
-        statusEl.innerHTML = `<div class="banner banner-error">코드와 이름을 모두 입력해주세요.</div>`;
+      if(!teacherName || !name){
+        statusEl.innerHTML = `<div class="banner banner-error">선생님과 이름을 모두 입력해주세요.</div>`;
+        return;
+      }
+      state.studentName = name;
+      state.studentTeacherName = teacherName;
+
+      // 공유 링크로 바로 들어온 경우: 세트를 이미 갖고 있어서 코드 조회 없이 바로 시작
+      if(state.currentSet){
+        goto('studentQuiz', { currentSet: state.currentSet, currentSetId: state.currentSet.id });
+        return;
+      }
+
+      const code = document.getElementById('f-code').value.trim();
+      if(!code){
+        statusEl.innerHTML = `<div class="banner banner-error">세트 코드를 입력해주세요.</div>`;
         return;
       }
       enterBtn.disabled = true;
@@ -1133,7 +1301,6 @@ function attachHandlers(){
           enterBtn.disabled = false;
           return;
         }
-        state.studentName = name;
         goto('studentQuiz', { currentSet: set, currentSetId: set.id });
       }catch(e){
         statusEl.innerHTML = `<div class="banner banner-error">오류가 발생했어요: ${escapeHtml(e.message)}</div>`;
@@ -1174,7 +1341,7 @@ function attachHandlers(){
       const statusEl = document.getElementById('quiz-status');
       statusEl.innerHTML = `<div class="spinner"></div>`;
       try{
-        await saveSubmission(state.currentSetId, state.studentName, score, total, answersByIndex);
+        await saveSubmission(state.currentSetId, state.studentName, state.studentTeacherName, score, total, answersByIndex);
         state.lastGrade = { score, total, answersByIndex };
         goto('studentResult');
       }catch(e){
@@ -1199,16 +1366,11 @@ async function boot(){
   const params = new URLSearchParams(location.search);
   const setId = params.get('set');
   if(setId){
-    const area = document.getElementById('app');
     try{
       const set = await fetchSetById(setId);
       if(set){
-        const name = prompt('이름을 입력하세요');
-        if(name && name.trim()){
-          state.studentName = name.trim();
-          goto('studentQuiz', { currentSet: set, currentSetId: set.id });
-          return;
-        }
+        goto('studentEntry', { currentSet: set, currentSetId: set.id });
+        return;
       }
     }catch(e){ /* fall through to home */ }
     goto('home');
