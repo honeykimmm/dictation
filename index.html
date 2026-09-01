@@ -453,6 +453,18 @@ async function fetchSubmissions(setId){
   const snap = await db.collection('dictationSets').doc(setId).collection('submissions').orderBy('score','desc').get();
   return snap.docs.map(d => ({ id:d.id, ...d.data() }));
 }
+
+// 선생님별 반 명단(고정 인원) — 결과 화면에서 제출/미제출 확인용
+async function fetchRoster(teacherName){
+  const doc = await db.collection('rosters').doc(teacherName).get();
+  return doc.exists ? (doc.data().students || []) : [];
+}
+async function saveRoster(teacherName, students){
+  await db.collection('rosters').doc(teacherName).set({
+    students, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+}
+  
 // 특정 학생(같은 선생님 소속)이 지금까지 제출한 모든 세트의 결과를 모아서 가져오기 (리포트 카드용)
 async function fetchStudentSubmissions(studentName, teacherName){
   const snap = await db.collectionGroup('submissions')
