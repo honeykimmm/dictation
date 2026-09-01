@@ -734,33 +734,107 @@ async function loadTeacherResults(){
   const area = document.getElementById('results-area');
   if(!area || !state.currentSetId) return;
   try{
-    const [set, allSubs] = await Promise.all([
+    const [set, allSubs, roster] = await Promise.all([
       fetchSetById(state.currentSetId),
-      fetchSubmissions(state.currentSetId)
+      fetchSubmissions(state.currentSetId),
+      fetchRoster(state.currentTeacherName)
     ]);
     const subs = allSubs.filter(s => s.teacherName === state.currentTeacherName);
     if(!set){ area.innerHTML = `<div class="empty-state">세트를 찾을 수 없어요.</div>`; return; }
     const link = location.origin + location.pathname + '?set=' + set.id;
-    const rows = subs.map((s,i) => `
+
+    const subByName = {};
+    subs.forEach(s => { subByName[s.studentName] = s; });
+    const rosterRows = roster.map(name => ({ name, sub: subByName[name] || null }));
+    const extraSubs = subs.filter(s => !roster.includes(s.studentName));
+    const doneCount = rosterRows.filter(r => r.sub).length;
+
+    let rowsHtml = '';
+    const idxToSub = [];
+    rosterRows.forEach(r => {
+      if(r.sub){
+        rowsHtml += `
+        <tr>
+          <td><input type="checkbox" class="sub-select" data-idx="${idxToSub.length}"></td>
+          <td>${escapeHtml(r.name)}</td>
+          <td>${r.sub.score} / ${r.sub.total}</td>
+          <td>${r.sub.total ? Math.round(r.sub.score/r.sub.total*100) : 0}%</td>
+        </tr>`;
+        idxToSub.push(r.sub);
+      } else {
+        rowsHtml += `
+        <tr style="opacity:0.55;">
+          <td></td>
+          <td>${escapeHtml(r.name)}</td>
+          <td colspan="2" style="font-style:italic; color:var(--ink-soft);">미제출</td>
+        </tr>`;
+      }
+    });
+    extraSubs.forEach(s => {
+      rowsHtml += `
       <tr>
-        <td><input type="checkbox" class="sub-select" data-idx="${i}"></td>
-        <td>${escapeHtml(s.studentName)}</td>
+        <td><input type="checkbox" class="sub-select" data-idx="${idxToSub.length}"></td>
+        <td>${escapeHtml(s.studentName)} <span class="muted" style="font-size:0.72rem;">(명단 외)</span></td>
         <td>${s.score} / ${s.total}</td>
         <td>${s.total ? Math.round(s.score/s.total*100) : 0}%</td>
-      </tr>`).join('');
+      </tr>`;
+      idxToSub.push(s);
+    });
+
     area.innerHTML = `
       <div class="eyebrow">결과 보기</div>
       <h2>${escapeHtml(set.title||'(제목 없음)')}</h2>
       <p class="muted">학생 공유 코드 <span class="code-pill">${escapeHtml(set.code)}</span> · 총 빈칸 ${blankCount(set.segments||[])}개</p>
       <div class="example-box">학생 링크: ${escapeHtml(link)}</div>
+
+      <div class="card" style="margin-top:16px; margin-bottom:16px;">
+        <div class="flabel" style="margin-bottom:8px;">우리 반 명단</div>
+        ${roster.length === 0
+          ? `<p class="muted" style="margin-bottom:10px;">아직 등록된 명단이 없어요. 등록해두면 세트마다 제출 여부를 한눈에 볼 수 있어요.</p>`
+          : `<p class="muted" style="margin-bottom:10px;">등록 ${roster.length}명 중 제출 완료 <b>${doneCount}명</b>, 미제출 ${roster.length - doneCount}명</p>`}
+        <button class="btn btn-ghost" id="btn-toggle-roster-edit">${roster.length === 0 ? '명단 등록하기' : '명단 수정'}</button>
+        <div id="roster-edit-area" style="display:none; margin-top:12px;">
+          <textarea class="input" id="f-roster" style="min-height:120px;" placeholder="한 줄에 한 명씩 입력">${escapeHtml(roster.join('\n'))}</textarea>
+          <div class="btn-row" style="margin-top:10px;">
+            <button class="btn btn-primary" id="btn-save-roster">명단 저장</button>
+          </div>
+          <div id="roster-status"></div>
+        </div>
+      </div>
+
       <div style="margin-top:18px;">
-        ${subs.length === 0
+        ${(rosterRows.length === 0 && extraSubs.length === 0)
           ? `<div class="empty-state">아직 우리 반 학생 중 제출한 사람이 없어요.</div>`
-          : `<table><thead><tr><th><input type="checkbox" id="select-all-subs"></th><th>이름</th><th>점수</th><th>정답률</th></tr></thead><tbody>${rows}</tbody></table>
+          : `<table><thead><tr><th><input type="checkbox" id="select-all-subs"></th><th>이름</th><th>점수</th><th>정답률</th></tr></thead><tbody>${rowsHtml}</tbody></table>
              <div class="btn-row" style="margin-top:14px;">
                <button class="btn btn-primary" id="btn-print-selected">🖨️ 선택한 학생 결과 인쇄 / PDF</button>
              </div>`}
       </div>`;
+
+    const toggleBtn = document.getElementById('btn-toggle-roster-edit');
+    const rosterEditArea = document.getElementById('roster-edit-area');
+    if(toggleBtn && rosterEditArea){
+      toggleBtn.addEventListener('click', () => {
+        rosterEditArea.style.display = rosterEditArea.style.display === 'none' ? 'block' : 'none';
+      });
+    }
+    const saveRosterBtn = document.getElementById('btn-save-roster');
+    if(saveRosterBtn){
+      saveRosterBtn.addEventListener('click', async () => {
+        const names = document.getElementById('f-roster').value.split('\n').map(s=>s.trim()).filter(Boolean);
+        const statusEl = document.getElementById('roster-status');
+        saveRosterBtn.disabled = true;
+        statusEl.innerHTML = `<div class="spinner"></div>`;
+        try{
+          await saveRoster(state.currentTeacherName, names);
+          loadTeacherResults();
+        }catch(e){
+          statusEl.innerHTML = `<div class="banner banner-error">저장 중 오류: ${escapeHtml(e.message)}</div>`;
+          saveRosterBtn.disabled = false;
+        }
+      });
+    }
+
     const selectAllCb = document.getElementById('select-all-subs');
     if(selectAllCb){
       selectAllCb.addEventListener('change', () => {
@@ -772,7 +846,7 @@ async function loadTeacherResults(){
       printSelectedBtn.addEventListener('click', () => {
         const idxs = Array.from(document.querySelectorAll('.sub-select:checked')).map(cb => parseInt(cb.dataset.idx, 10));
         if(idxs.length === 0){ alert('인쇄할 학생을 먼저 선택해주세요.'); return; }
-        const selectedSubs = idxs.map(i => subs[i]);
+        const selectedSubs = idxs.map(i => idxToSub[i]);
         const pagesHtml = selectedSubs.map(s => `
           <div class="print-page card">
             <h2>${escapeHtml(set.title||'')}</h2>
@@ -792,7 +866,6 @@ async function loadTeacherResults(){
     area.innerHTML = `<div class="banner banner-error">결과를 불러오지 못했어요: ${escapeHtml(e.message)}</div>`;
   }
 }
-
 /* ---- TEACHER: EDIT SET ---- */
 function renderTeacherEditSetShell(){
   setTimeout(loadTeacherEditSet, 0);
