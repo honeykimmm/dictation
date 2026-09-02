@@ -1482,6 +1482,24 @@ function attachHandlers(){
   }
 
   // 퀴즈 제출 → 채점
+  // 빈칸 입력: Enter로 다음 빈칸 이동, 마지막 빈칸에서는 제출 버튼으로 포커스
+  const blankInputs = Array.from(document.querySelectorAll('.blank-input[data-blank]'));
+  blankInputs.forEach((inp, i) => {
+    inp.addEventListener('keydown', (e) => {
+      if(e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = blankInputs[i + 1];
+      if(next){
+        next.focus();
+        next.select();
+      } else {
+        const submitBtnEl = document.getElementById('btn-submit-quiz');
+        if(submitBtnEl) submitBtnEl.focus();
+      }
+    });
+  });
+
+  // 퀴즈 제출 → 채점
   const submitBtn = document.getElementById('btn-submit-quiz');
   if(submitBtn){
     submitBtn.addEventListener('click', async () => {
